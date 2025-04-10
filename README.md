@@ -18,4 +18,4 @@ Elenco variabili e breve descrizione:
 14. apiId, identificativo del problema nel dataset.
 15. dataInserted, data in cui il problema è stato caricato in app.
 16. holdsetup.description, anno della Moonboard e grado di inclinazione del problema.
-17-214. A1, A2, … , K17, K18 variabili indicatrici che indicano la posizione delle prese utilizz
+17-214. A1, A2, … , K17, K18 variabili che indicano la posizione delle prese utilizzate nel problema. {0 se il pezzo non è stato usato, 1 se è stato usato, 2 se usato ed è lo start, 3 se usato ed è la fine}
