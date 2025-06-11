@@ -1,6 +1,11 @@
-# moonboard
+# Moonboard
 
-Elenco variabili e breve descrizione:
+## Dati
+Tutti i dati utilizzati si possono trovare a questo link:
+https://drive.google.com/drive/folders/1-KI3rkEKUp-kfoWxsWlLJ6sKM6QOYs56?usp=drive_link
+
+## Elenco variabili e breve descrizione: 
+(queste variabili sono quelle presenti nel file json originale, attraverso alcune operazione molte sono state eliminate)
 
 1. name, nome del problema.
 2. grade, livello di difficoltà assegnato dal creatore.
