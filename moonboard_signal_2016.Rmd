@@ -1,0 +1,982 @@
+---
+title: "Search for signal"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(sm)
+library(ggplot2)
+```
+
+```{r}
+setwd("C:/Users/fra24/OneDrive/Documenti/uni/magistrale/tesi/data")
+df = read.csv("moonboard_2016_engeneered.csv")
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+df$grade = as.factor(df$grade)
+df$userGrade = as.factor(df$userGrade)
+df$setby = as.factor(df$setby)
+df$isBenchmark = as.factor(df$isBenchmark)
+df$holdsets = as.factor(df$holdsets)
+```
+
+```{r}
+df[10:207] <- lapply(df[10:207], as.factor)
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+levels(df$grade)
+```
+
+```{r}
+# Vettore dei livelli ordinati
+livelli <- c("6B", "6B+", "6C", "6C+", 
+             "7A", "7A+", "7B", "7B+", "7C", "7C+", 
+             "8A", "8A+", "8B", "8B+")
+
+# Converti df$grade in fattore ordinato e poi in numerico
+
+#y da 0 a 16
+
+df$y <- as.numeric(factor(df$grade, levels = livelli)) - 1
+head(df$grade)
+head(df$y)
+```
+
+```{r}
+# Lista delle variabili da rimuovere
+vars_to_remove <- c('A1', 'A2', 'A3', 'A4', 'A7', 'A8', 'A17',
+                    'B1', 'B2', 'B5', 'B14', 'B17',
+                    'C1', 'C2', 'C3', 'C4', 'C17',
+                    'D1', 'D2', 'D4',
+                    'E1', 'E2', 'E3', 'E4', 'E5', 'E17',
+                    'F1', 'F2', 'F3', 'F4', 'F17', 'F18',
+                    'G1', 'G3', 'G5',
+                    'H1', 'H2', 'H3', 'H4', 'H6', 'H17',
+                    'I1', 'I2', 'I3', 'I17',
+                    'J1', 'J3', 'J4', 'J15', 'J17', 'J18',
+                    'K1', 'K2', 'K3', 'K4', 'K15', 'K17')
+
+# Rimozione delle variabili
+df <- df[ , !(names(df) %in% vars_to_remove)]
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+df_NONTOCCARE = df
+```
+
+```{r}
+df$name = NULL
+df$userGrade = NULL
+df$apiId = NULL
+```
+
+```{r}
+df$grade = NULL
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+df[,6:146]
+```
+
+```{r}
+# Trasforma le colonne da 6 a 146 in variabili dicotomiche
+df[, 6:146] <- lapply(df[, 6:146], function(x) ifelse(x == 0, 0, 1))
+df[6:146] <- lapply(df[6:146], as.factor)
+
+```
+
+```{r}
+str(df)
+```
+
+STIMA/VERIFICA:
+
+```{r}
+dati = df
+```
+
+```{r}
+n = dim(dati)[1]
+p = dim(dati)[2]
+set.seed(42)
+
+# 75% stima e 25% verifica
+ind = sample(1:n, round(0.75*n))
+stima = dati[ind, ]
+ver = dati[-ind, ]
+```
+
+```{r}
+dim(stima)
+dim(ver)
+```
+
+```{r}
+tipo_var <- function(){
+  
+  tipo_variabile <<- sapply(dati %>% select(-y), class)
+  var_qualitative <<- names(dati %>% select(-y))[tipo_variabile == "factor"]
+  var_quantitative <<- setdiff(names(dati %>% select(-y)), var_qualitative)
+  
+  cat("VAR QUALITATIVE: \n", "\n", paste(var_qualitative, 
+                                         collapse = "  "), "\n", "\n",
+      "VAR QUANTITATIVE: \n", "\n", paste(var_quantitative, 
+                                          collapse = "  "), "\n", sep = "")
+  #DA RIFARE PERIODICAMENTE
+}
+```
+
+```{r}
+tipo_var()
+```
+
+```{r}
+stima[,var_quantitative] <- stima %>% select(all_of(var_quantitative)) %>% scale 
+ver[,var_quantitative] <- ver %>% select(all_of(var_quantitative)) %>% scale
+```
+
+```{r}
+xmat.model.stima <- model.matrix(y~.-1, data = stima)
+xmat.model.ver <- model.matrix(y~.-1, data = ver)
+```
+
+```{r}
+dim(xmat.model.stima)
+```
+
+```{r}
+# Salvo nomi delle variabili:
+varnames <- colnames(dati %>% select(-y))
+# Creo formula con tutte le variabili:
+form.tuttevars <- paste("y ~", paste(varnames,collapse = " + "), collapse = NULL)
+# Salvo nomi delle variabili della matrice del modello:
+varnames2 <- colnames(xmat.model.stima)
+```
+
+```{r}
+m.err<-  function(y_hat, y_oss = ver$y){
+  mse <- mean((y_hat-y_oss)^2)
+  return(t(data.frame(mse = mse)))
+}
+```
+
+```{r}
+# Baseline: media
+y_pred_mean <- rep(mean(stima$y), length(ver$y))
+mse_mean <- mean((ver$y - y_pred_mean)^2)
+
+# Baseline: mediana
+y_pred_median <- rep(median(stima$y), length(ver$y))
+mse_median <- mean((ver$y - y_pred_median)^2)
+
+# Baseline: casuale
+set.seed(123)
+y_pred_random <- sample(stima$y, length(ver$y), replace = TRUE)
+mse_random <- mean((ver$y - y_pred_random)^2)
+
+# Creazione tabella riepilogativa
+baseline_results <- data.frame(
+  Modello = c("Baseline_Media", "Baseline_Mediana", "Baseline_Casuale"),
+  MSE = round(c(mse_mean, mse_median, mse_random),3)
+)
+
+print(baseline_results)
+```
+
+# Modellazione:
+
+### Regressione lineare, modello saturo
+
+```{r}
+m.lm <- lm(y ~ ., data = stima)
+
+p.lm <- pmax(predict(m.lm, newdata = ver), 0)
+
+# Errori:
+err <- data.frame(Lineare = m.err(p.lm))
+t(err)
+```
+
+```{r}
+err$Baseline_Mean <- mse_mean
+err$Baseline_Median <- mse_median
+err$Baseline_Random <- mse_random
+```
+
+```{r}
+library(dplyr)
+
+err <- err %>%
+  mutate(
+    Baseline_Mean = mse_mean,
+    Baseline_Median = mse_median,
+    Baseline_Random = mse_random
+  ) %>%
+  relocate(Baseline_Mean, Baseline_Median, Baseline_Random, .before = 1)
+```
+
+```{r}
+t(err)
+```
+
+```{r}
+summary(m.lm)
+```
+
+```{r}
+# Estrai coefficienti (escludendo intercept)
+coefs <- summary(m.lm)$coefficients
+coefs <- coefs[-1, , drop = FALSE]
+
+# Data frame con variabile e beta
+df_coefs_lin <- data.frame(
+  Beta = coefs[, "Estimate"],
+  row.names = rownames(coefs)
+)
+
+# Top 15 positivi
+top_pos_lin <- head(df_coefs_lin[order(-df_coefs_lin$Beta), , drop = FALSE], 15)
+
+# Top 15 negativi
+top_neg_lin <- head(df_coefs_lin[order(df_coefs_lin$Beta), , drop = FALSE], 15)
+
+```
+
+```{r}
+# Imposta nomi delle righe come variabili, solo colonna Beta
+print(top_pos_lin)
+```
+
+```{r}
+print(top_neg_lin)
+```
+
+### Modello lineare, regressione stepwise (non va con il numero totale di osservazioni)
+
+Proviamo a ridurre il numero totale di osservazioni: —–\> CONTINUA A NON FUNZIONARE
+
+```{r}
+# Campioni ridotti: ad esempio il 30% di ciascun dataset
+set.seed(123)  # Per riproducibilità
+
+# Dimensione campione (puoi cambiarla)
+p_stima <- 0.1
+p_ver <- 0.1
+
+n_stima <- floor(nrow(stima) * p_stima)
+n_ver <- floor(nrow(ver) * p_ver)
+
+# Estrazione casuale dei campioni
+campione_stima <- stima[sample(nrow(stima), n_stima), ]
+campione_ver <- ver[sample(nrow(ver), n_ver), ]
+
+# 1. Trova variabili costanti in campione_stima
+costanti_stima <- sapply(campione_stima, function(x) length(unique(x)) == 1)
+
+# 2. Trova variabili costanti in campione_ver
+costanti_ver <- sapply(campione_ver, function(x) length(unique(x)) == 1)
+
+# 3. Unione delle variabili costanti in almeno uno dei due dataset
+variabili_costanti <- names(which(costanti_stima | costanti_ver))
+
+# 4. Rimuovi le variabili costanti da entrambi i dataset
+campione_stima <- campione_stima[, !names(campione_stima) %in% variabili_costanti]
+campione_ver   <- campione_ver[, !names(campione_ver) %in% variabili_costanti]
+```
+
+```{r}
+# Modello nullo:
+m0 <- lm(y ~ 1, data = campione_stima)
+
+# Stima sull'insieme di stima:
+m.lm.step <- step(m0, scope = formula(lm(y ~ ., data = campione_stima)), 
+                  direction = "forward", trace = 0, steps = 100)
+        # trace = 0 silenzia i passaggi intermedi
+        # - scope e' il modello completo a cui deve arrivare
+                # alternativamente
+        # - steps indica il massimo numero di passi da considerare
+        #   (default 1000), se ci mette troppo ad esempio
+
+length(names(m.lm.step$model)) -1 # conteggio var
+names(m.lm.step$model) # variabili incluse (tranne y)
+setdiff(names(campione_stima), names(m.lm.step$model))  # variabili escluse
+formula(m.lm.step)
+```
+
+```{r}
+summary(m.lm.step)
+```
+
+```{r}
+coef_sel = names(m.lm.step$coefficients)
+sort(m.lm.step$coefficients)[1:10]
+sort(m.lm.step$coefficients, decreasing = T)[1:10]
+```
+
+```{r}
+# Previsioni sull'insieme di verifica:
+p.lm.step <- predict(m.lm.step, newdata = ver)
+# Errori:
+p.lm.step
+```
+
+### Regression Ridge:
+
+```{r}
+library(glmnet)
+# Divisione in stima-convalida:
+set.seed(42)
+cb1 <- sample(1:NROW(stima), (2/3)*NROW(stima))
+cb2 <- setdiff(1:NROW(stima), cb1)
+```
+
+```{r}
+# II TIPO: Selezione parametro di regolazione nell'insieme di convalida: ----
+
+lambda.grid <- 10^seq(-3, 1, length = 150) #guarda grafico plot(m.ridge.conv) e muovila 
+#lambda.grid <- 10^seq(-3,+3,length=100) alternative, guardando m.plot
+m.ridge.conv <- glmnet(xmat.model.stima[cb1,],
+                      stima$y[cb1],
+                      alpha = 0,
+                      lambda = lambda.grid)
+
+# Graficamente - profilo coefficienti al variare di lambda:
+plot(m.ridge.conv, xvar = "lambda", label = T)
+
+p.lm <- pmax(predict(m.lm, newdata = ver), 0)
+
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.ridge <- pmax(predict(m.ridge.conv, newx = xmat.model.stima[cb2,]), 0)
+errori.ridge <- apply((stima$y[cb2] - p.ridge)^2, 2, mean)
+```
+
+```{r}
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(m.ridge.conv$lambda), errori.ridge, ylab = "Errore", xlab = expression(log(lambda)))
+# zoom sulla parte interessante del grafico
+plot(log(m.ridge.conv$lambda), errori.ridge, ylab="Errore",
+     xlab=expression(log(lambda)), type="b")
+
+# Qual e' il modello con errore minimo?
+which.min(errori.ridge)
+# e a quale lambda corrisponde?
+lambda.best <- m.ridge.conv$lambda[which.min(errori.ridge)]
+lambda.best
+
+abline(v = log(lambda.best), col = 2, lwd = 2)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.ridge <- pmax(predict(m.ridge.conv, newx = xmat.model.ver, s = lambda.best),0)
+
+# Errori:
+err$Lineare_Ridge = m.err(pred.ridge)
+t(err)
+```
+
+```{r}
+coefs_ridge <- coef(m.ridge.conv, s = lambda.best)
+
+# Trasformo in vettore numerico e tolgo intercept
+coefs_vec <- as.vector(coefs_ridge)[-1]
+names(coefs_vec) <- rownames(coefs_ridge)[-1]
+```
+
+```{r}
+# Creo dataframe con Beta e rownames le variabili
+df_coefs_ridge <- data.frame(
+  Beta = coefs_vec,
+  row.names = names(coefs_vec)
+)
+
+# Top 15 positivi
+top_pos_ridge <- head(df_coefs_ridge[order(-df_coefs_ridge$Beta), , drop = FALSE], 15)
+
+# Top 15 negativi
+top_neg_ridge <- head(df_coefs_ridge[order(df_coefs_ridge$Beta), , drop = FALSE], 15)
+```
+
+```{r}
+print(top_pos_ridge)
+```
+
+```{r}
+print(top_neg_ridge)
+```
+
+### Regressione LASSO:
+
+```{r}
+    # - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-4, 0, length = 150) #guarda grafico plot(m.lasso.conv) e muovila 
+m.lasso.conv <- glmnet(xmat.model.stima[cb1,],
+                       stima$y[cb1],
+                       alpha = 1,
+                       lambda = lambda.grid)
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+plot(m.lasso.conv, "lambda", label = T)
+
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.lasso <- pmax(predict(m.lasso.conv, newx = xmat.model.stima[cb2,]),0)
+errori.lasso <- apply((stima$y[cb2] - p.lasso)^2, 2, mean)
+```
+
+```{r}
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(m.lasso.conv$lambda), errori.lasso, ylab = "Errore", xlab = expression(log(lambda)))
+# zoom sulla parte interessante del grafico
+plot(log(m.lasso.conv$lambda), errori.lasso, ylab="Errore",
+     xlab=expression(log(lambda)))
+
+# Qual e' il modello con errore minimo?
+which.min(errori.lasso)
+# e a quale lambda corrisponde?
+lambda.best <- m.lasso.conv$lambda[which.min(errori.lasso)]
+lambda.best
+
+abline(v = log(lambda.best), col = 2, lwd = 2)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+# Variabili selezionate dal lasso:
+varlasso <- varnames2[beta_lasso != 0]
+#varlasso #variabili selezionate dal lasso
+setdiff(varnames2, varlasso) # variabili non selezionate dal lasso
+length(varlasso)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.lasso <- pmax(predict(m.lasso.conv, newx = xmat.model.ver, s = lambda.best),0)
+
+# Errori:
+err$Lineare_Lasso = m.err(pred.lasso)
+t(err)
+```
+
+```{r}
+# Estrai coefficienti al lambda scelto
+coefs_lasso <- coef(m.lasso.conv, s = lambda.best)
+
+# Trasforma in vettore numerico escludendo l'intercetta
+coefs_vec <- as.vector(coefs_lasso)[-1]
+names(coefs_vec) <- rownames(coefs_lasso)[-1]
+
+# Crea data frame con Beta e rownames variabile
+df_coefs_lasso <- data.frame(
+  Beta = coefs_vec,
+  row.names = names(coefs_vec)
+)
+
+# Top 15 coefficienti più positivi
+top_pos_lasso <- head(df_coefs_lasso[order(-df_coefs_lasso$Beta), , drop = FALSE], 15)
+
+# Top 15 coefficienti più negativi
+top_neg_lasso <- head(df_coefs_lasso[order(df_coefs_lasso$Beta), , drop = FALSE], 15)
+```
+
+```{r}
+# Stampa i risultati
+print(top_pos_lasso)
+```
+
+```{r}
+print(top_neg_lasso)
+```
+
+### Regressione LASSO adattivo
+
+```{r}
+# - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-4, 0, length = 150) #guarda grafico plot(m.lasso.conv) e muovila 
+m.lasso_ada.conv <- glmnet(xmat.model.stima[cb1,],
+                           stima$y[cb1],
+                           alpha = 1, lambda = lambda.grid,
+                           penalty.factors = 1/abs(coef(m.lm)[-1]))
+
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+plot(m.lasso_ada.conv, "lambda", label = T)
+```
+
+```{r}
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.lasso_ada <- pmax(predict(m.lasso_ada.conv, newx = xmat.model.stima[cb2,]), 0)
+errori.lasso_ada <- apply((stima$y[cb2] - p.lasso_ada)^2, 2, mean)
+
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(m.lasso_ada.conv$lambda), errori.lasso_ada, ylab = "Errore", xlab = expression(log(lambda)))
+# zoom sulla parte interessante del grafico
+plot(log(m.lasso_ada.conv$lambda), errori.lasso_ada, ylab="Errore",
+     xlab=expression(log(lambda)))
+
+# Qual e' il modello con errore minimo?
+which.min(errori.lasso_ada)
+# e a quale lambda corrisponde?
+lambda.best <- m.lasso_ada.conv$lambda[which.min(errori.lasso_ada)]
+lambda.best
+
+abline(v = log(lambda.best), col = 2, lwd = 2)
+```
+
+```{r}
+beta_lasso_ada <- m.lasso_ada.conv$beta[,which(m.lasso_ada.conv$lambda == lambda.best)]
+# Variabili selezionate dal lasso:
+varlasso_ada <- varnames2[beta_lasso_ada != 0]
+#varlasso_ada #variabili selezionate dal lasso
+setdiff(varnames2, varlasso_ada) # variabili non selezionate dal lasso
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.lasso_ada <- pmax(predict(m.lasso_ada.conv, newx = xmat.model.ver, s = lambda.best), 0)
+```
+
+```{r}
+# Errori:
+err$Lineare_Lasso_Adattivo = m.err(pred.lasso_ada)
+t(err)
+```
+
+```{r}
+# Estrai coefficienti al lambda scelto
+coefs_lasso_ada <- coef(m.lasso_ada.conv, s = lambda.best)
+
+# Converti in vettore numerico, escludendo l'intercetta
+coefs_vec <- as.vector(coefs_lasso_ada)[-1]
+names(coefs_vec) <- rownames(coefs_lasso_ada)[-1]
+
+# Crea dataframe con Beta e rownames variabili
+df_coefs_lasso_ada <- data.frame(
+  Beta = coefs_vec,
+  row.names = names(coefs_vec)
+)
+
+# Prendi i top 15 beta più positivi
+top_pos_lasso_ada <- head(df_coefs_lasso_ada[order(-df_coefs_lasso_ada$Beta), , drop = FALSE], 15)
+
+# Prendi i top 15 beta più negativi
+top_neg_lasso_ada <- head(df_coefs_lasso_ada[order(df_coefs_lasso_ada$Beta), , drop = FALSE], 15)
+```
+
+```{r}
+# Stampa i risultati
+print(top_pos_lasso_ada)
+```
+
+```{r}
+print(top_neg_lasso_ada)
+```
+
+### Albero di regressione:
+
+```{r}
+library(tree)
+
+# Crescita sull'insieme di stima:
+m.tree = tree(y~., data = stima[cb1,], 
+              control = tree.control(nobs = length(cb1),
+                                     minsize = 2,
+                                     mindev = 0.001))
+```
+
+```{r}
+print(m.tree)
+summary(m.tree)
+```
+
+```{r}
+    # Questo grafico serve solo per vedere se si ottiene un albero sovradattato.
+    # In caso contrario, diminuire mindev per farlo crescere di piu'.
+    
+# Potatura sull'insieme di convalida:
+m.tree.prune = prune.tree(m.tree, newdata = stima[-cb1,])
+
+# Andamento della devianza in funzione di size:
+plot(m.tree.prune)
+# Evidenzio il valore di size per cui la devianza e' minima:
+J = m.tree.prune$size[which.min(m.tree.prune$dev)]
+J
+abline(v = J, lty = 2, col = 2)
+abline(h = min(m.tree.prune$dev), col=2)
+    # Grafico da includere nel report
+```
+
+```{r}
+apply(df[, 6:146], 2, function(x) length(unique(x)))
+
+```
+
+```{r, fig.width=20, fig.height=20}
+# Albero finale:
+m.tree.best = prune.tree(m.tree, best = J)
+plot(m.tree.best)
+text(m.tree.best, cex = 1, pretty = 5)
+    # Grafico da includere nel report
+
+# Previsioni sull'insieme di verifica:
+p.tree = pmax(predict(m.tree.best, newdata = ver), 0)
+```
+
+```{r}
+# Errori:
+err$Albero = m.err(p.tree)
+t(err)
+```
+
+### MCP
+
+```{r}
+library(ncvreg)
+```
+
+```{r}
+#vediamo se aumento gamma, più vado verso LASSO
+mcp7 = ncvreg(xmat.model.stima[cb1,], stima$y[cb1], seed = 876, gamma = 20)
+plot(mcp7, log=T) #diminuisce la finestra grigia, abbiamo percorsi più lunghi e 
+#lisci dei coeff
+
+```
+
+```{r}
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.mcp <- pmax(predict(mcp7, xmat.model.stima[cb2,]), 0)
+errori.mcp <- apply((stima$y[cb2] - p.mcp)^2, 2, mean)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(mcp7$lambda), errori.mcp, ylab = "Errore", xlab = expression(log(lambda)))
+# zoom sulla parte interessante del grafico
+plot(log(mcp7$lambda), errori.mcp, ylab="Errore",
+     xlab=expression(log(lambda)))
+
+# Qual e' il modello con errore minimo?
+which.min(errori.mcp)
+# e a quale lambda corrisponde?
+lambda.best.mcp <- mcp7$lambda[which.min(errori.mcp)]
+lambda.best.mcp
+
+abline(v = log(lambda.best.mcp), col = 2, lwd = 2)
+```
+
+```{r}
+plot(mcp7, log=T)
+abline(v=log(lambda.best.mcp), col=2)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+p.mcp7 <- pmax(predict(mcp7, xmat.model.ver, s = lambda.best.mcp), 0)
+
+# Errori:
+err$MCP7 = m.err(p.mcp7)
+t(err)
+```
+
+```{r}
+beta_mcp <- mcp7$beta[,which(mcp7$lambda == lambda.best.mcp)]
+#sort(beta_scad[beta_scad!=0])[1:10]
+#sort(beta_scad[beta_scad!=0], decreasing = T)[1:10]
+# Variabili selezionate dal lasso:
+varmcp <- varnames2[beta_mcp != 0]
+#varlasso #variabili selezionate dal lasso
+setdiff(varnames2, varmcp) # variabili non selezionate da mcp
+length(varmcp)
+```
+
+```{r}
+coefs_mcp <- coef(mcp7, lambda = lambda.best.mcp)
+var_names <- names(coefs_mcp)
+coefs_vec <- as.vector(coefs_mcp)
+
+# Escludo l'intercetta
+var_names <- var_names[-1]
+coefs_vec <- coefs_vec[-1]
+```
+
+```{r}
+df_coefs_mcp <- data.frame(
+  Variable = var_names,
+  Beta = coefs_vec
+)
+
+# Top 15 positivi
+top_pos_mcp <- head(df_coefs_mcp[order(-df_coefs_mcp$Beta), ], 15)
+
+# Top 15 negativi
+top_neg_mcp <- head(df_coefs_mcp[order(df_coefs_mcp$Beta), ], 15)
+```
+
+```{r}
+print(top_pos_mcp)
+```
+
+```{r}
+print(top_neg_mcp)
+```
+
+### SCAD:
+
+```{r}
+scad8 = ncvreg(xmat.model.stima[cb1,], stima$y[cb1], penalty = "SCAD", gamma = 30)
+plot(scad8, log = T)
+```
+
+```{r}
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.scad <- pmax(predict(scad8, xmat.model.stima[cb2,]), 0)
+errori.scad <- apply((stima$y[cb2] - p.scad)^2, 2, mean)
+```
+
+```{r}
+
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(scad8$lambda), errori.scad, ylab = "Errore", xlab = expression(log(lambda)))
+# zoom sulla parte interessante del grafico
+plot(log(scad8$lambda), errori.scad, ylab="Errore",
+     xlab=expression(log(lambda)))
+
+# Qual e' il modello con errore minimo?
+which.min(errori.scad)
+# e a quale lambda corrisponde?
+lambda.best.scad <- scad8$lambda[which.min(errori.scad)]
+lambda.best.scad
+
+abline(v = log(lambda.best.scad), col = 2, lwd = 2)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+plot(scad8, log = T)
+abline(v=log(lambda.best.scad), col=2)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.scad8 <- pmax(predict(scad8, xmat.model.ver, s = lambda.best.scad), 0)
+
+# Errori:
+err$SCAD8 = m.err(pred.scad8)
+t(err)
+```
+
+```{r}
+beta_scad <- scad8$beta[,which(scad8$lambda == lambda.best.scad)]
+#sort(beta_scad[beta_scad!=0])[1:10]
+#sort(beta_scad[beta_scad!=0], decreasing = T)[1:10]
+# Variabili selezionate dal lasso:
+varscad <- varnames2[beta_scad != 0]
+#varlasso #variabili selezionate dal lasso
+setdiff(varnames2, varscad) # variabili non selezionate dal lasso
+length(varscad)
+```
+
+```{r}
+# Estrai i coefficienti al lambda scelto
+coefs_scad <- coef(scad8, lambda = lambda.best.scad)
+
+# Estrai nomi variabili e valori beta, escludendo intercept
+var_names <- names(coefs_scad)[-1]
+coefs_vec <- as.vector(coefs_scad)[-1]
+
+# Crea data frame con variabile e beta
+df_coefs_scad <- data.frame(
+  Variable = var_names,
+  Beta = coefs_vec
+)
+
+# Top 15 coefficienti più positivi
+top_pos_scad <- head(df_coefs_scad[order(-df_coefs_scad$Beta), ], 15)
+
+# Top 15 coefficienti più negativi
+top_neg_scad <- head(df_coefs_scad[order(df_coefs_scad$Beta), ], 15)
+```
+
+```{r}
+# Stampa risultati
+print(top_pos_scad)
+```
+
+```{r}
+print(top_neg_scad)
+```
+
+### ELASTIC NET:
+
+```{r}
+    # - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-4, 0, length = 25) #guarda grafico plot(m.lasso.conv) e muovila
+alpha.grid = seq(0, 1, length = 11)
+```
+
+```{r}
+results <- expand.grid(lambda = lambda.grid, alpha = alpha.grid)
+results$MSE <- NA
+
+for (i in 1:nrow(results)) {
+  l <- results$lambda[i]
+  a <- results$alpha[i]
+  
+  # Modello Elastic Net
+  fit <- glmnet(xmat.model.stima[cb1,], stima$y[cb1], alpha = a, lambda = l)
+  
+  # Predizione su cb2
+  pred <- predict(fit, newx = xmat.model.stima[cb2,], s = l)
+  
+  # Calcolo MSE
+  results$MSE[i] <- mean((stima$y[cb2] - pred)^2)
+}
+
+```
+
+```{r}
+best <- results[which.min(results$MSE), ]
+print(best)
+```
+
+```{r}
+m.elastic_net <- glmnet(
+  x = xmat.model.stima,
+  y = stima$y,
+  alpha = best$alpha,
+  lambda = best$lambda
+)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.elastic_net <- pmax(predict(m.elastic_net, 
+                                 newx = xmat.model.ver, s = best$lambda), 0)
+```
+
+```{r}
+pred.elastic_net <- predict(m.elastic_net, 
+                    newx = xmat.model.ver, s = best$lambda)
+
+```
+
+```{r}
+# Errori:
+err$Elastic_Net = m.err(pred.elastic_net)
+t(err)
+```
+
+```{r}
+# Estrai i coefficienti dal modello finale (escludi intercept)
+coefs <- coef(m.elastic_net, s = best$lambda)
+
+# Converti in vettore e ottieni i nomi delle variabili
+coefs_vec <- as.vector(coefs)[-1]  # rimuovi l'intercetta
+var_names <- rownames(coefs)[-1]
+
+# Crea un dataframe con variabili e beta
+df_coefs_final <- data.frame(
+  Variable = var_names,
+  Beta = coefs_vec
+)
+
+# Filtra eventuali coefficienti nulli (opzionale)
+df_coefs_final <- df_coefs_final[df_coefs_final$Beta != 0, ]
+
+# Top 15 positivi
+top_pos_final <- head(df_coefs_final[order(-df_coefs_final$Beta), ], 15)
+
+# Top 15 negativi
+top_neg_final <- head(df_coefs_final[order(df_coefs_final$Beta), ], 15)
+```
+
+```{r}
+# Stampa i risultati
+print(top_pos_final)
+```
+
+```{r}
+print(top_neg_final)
+```
+
+### Confronto con modelli in cui è presente solo la matrice delle prese:
+
+```{r}
+stima_holds = stima[,c(6:146, 522)]
+ver_holds = ver[,c(6:146, 522)]
+```
+
+```{r}
+xmat.model.stima_holds <- model.matrix(y~.-1, data = stima_holds)
+xmat.model.ver_holds <- model.matrix(y~.-1, data = ver_holds)
+```
+
+```{r}
+# Divisione in stima-convalida:
+set.seed(42)
+cb1_holds <- sample(1:NROW(stima_holds), (2/3)*NROW(stima_holds))
+cb2_holds <- setdiff(1:NROW(stima_holds), cb1)
+```
+
+```{r}
+    # - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-8, 0, length = 1000) #guarda grafico plot(m.lasso.conv) e muovila 
+m.lasso.conv_holds <- glmnet(xmat.model.stima_holds[cb1_holds,],
+                       stima_holds$y[cb1_holds],
+                       alpha = 1,
+                       lambda = lambda.grid)
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+plot(m.lasso.conv_holds, "lambda", label = T)
+
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.lasso_holds <- pmax(predict(m.lasso.conv_holds, 
+                        newx = xmat.model.stima_holds[cb2,]),0)
+errori.lasso_holds <- apply((stima_holds$y[cb2_holds] - p.lasso_holds)^2, 2, mean)
+```
+
+```{r}
+# Qual e' il modello con errore minimo?
+which.min(errori.lasso_holds)
+# e a quale lambda corrisponde?
+lambda.best_h <- m.lasso.conv_holds$lambda[which.min(errori.lasso_holds)]
+lambda.best_h
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.lasso_h <- pmax(predict(m.lasso.conv_holds, 
+                             newx = xmat.model.ver_holds, s = lambda.best_h),0)
+
+# Errori:
+err$Lineare_Lasso_JH = m.err(pred.lasso_h)
+t(err)
+```
