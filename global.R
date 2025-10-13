@@ -1,12 +1,23 @@
+if (!requireNamespace("reticulate", quietly = TRUE)) {
+  install.packages("reticulate")
+}
+
+# Initialize Python environment
+if (Sys.info()[["sysname"]] == "Linux") {
+  reticulate::use_python("/usr/bin/python3")
+}
+
+
 library(shiny)
 library(shinydashboard)
 library(reticulate)
 library(caret)
 library(dplyr)
 library(DT)
+#library(rlang)
 
 # Carica i pacchetti necessari per i modelli
-library_list <- c("xgboost", "lightgbm", "nnet")
+library_list <- c("xgboost", "lightgbm", "nnet", "catboost")
 for (lib in library_list) {
   if (requireNamespace(lib, quietly = TRUE)) {
     library(lib, character.only = TRUE)
@@ -15,9 +26,9 @@ for (lib in library_list) {
   }
 }
 
-# # Esempio: installazione automatica solo se non disponibile
+# # # Esempio: installazione automatica solo se non disponibile
 # if (!requireNamespace("catboost", quietly = TRUE)) {
-#   remotes::install_url('https://github.com/catboost/catboost/releases/download/v1.2.8/catboost-R-windows-x86_64-1.2.8.tgz', INSTALL_opts = c("--no-multiarch", "--no-test-load"))
+#    remotes::install_url('https://github.com/catboost/catboost/releases/download/v1.2.8/catboost-R-windows-x86_64-1.2.8.tgz', INSTALL_opts = c("--no-multiarch", "--no-test-load"))
 # }
 
 # Debug
@@ -45,14 +56,14 @@ single_level_train <- preprocessing_params$single_level_train
 calib = preprocessing_params$calib
 y_calib = preprocessing_params$y_calib
 xmat.model.cal = preprocessing_params$xmat.model.cal
-#cal_pool = preprocessing_params$cal_pool
+cal_pool = preprocessing_params$cal_pool
 
 y_calib_pred_ppr1 = preprocessing_params$y_calib_pred_ppr1
 y_calib_pred_ppr2 = preprocessing_params$y_calib_pred_ppr2
 y_calib_pred_nnet = preprocessing_params$y_calib_pred_nnet
 y_calib_pred_xgb = preprocessing_params$y_calib_pred_xgb
 y_calib_pred_lgb = preprocessing_params$y_calib_pred_lgb
-#y_calib_pred_cat = preprocessing_params$y_calib_pred_cat
+y_calib_pred_cat = preprocessing_params$y_calib_pred_cat
 
 # Definisci la mappatura dei valori numerici ai gradi V
 scale_vals <- c(4.61, 5.77, 6.92, 8.08, 9.23, 10.38, 11.54, 12.69, 13.84, 15.00, 16.15)
@@ -116,14 +127,14 @@ tryCatch({
   m.light <- NULL
 })
 
-# Cat Boosting (CatBoost) -------------------------------
-# tryCatch({
-#   m.cat <- readRDS("models/model_catboost.rds")
-#   message("Modello CatBoost caricato con successo")
-# }, error = function(e) {
-#   message("Errore nel caricare model_catboost.rds: ", e$message)
-#   m.cat <- NULL
-# })
+#Cat Boosting (CatBoost) -------------------------------
+tryCatch({
+  m.cat <- readRDS("models/model_catboost.rds")
+  message("Modello CatBoost caricato con successo")
+}, error = function(e) {
+  message("Errore nel caricare model_catboost.rds: ", e$message)
+  m.cat <- NULL
+})
 
 tryCatch({
   model_colnames <- readRDS("data/model_colnames.rds")
@@ -220,7 +231,7 @@ all_possible_holds <- expand.grid(
 
 # Definizione delle prese non standard del Moonboard 2016
 non_standard_holds <- c(
-  "A1", "A2", "A3", "A4", "A7", "A8", "A17", 
+  "A1", "A2", "A3", "A4", "A6", "A7", "A8", "A17", 
   "B1", "B2", "B5", "B14", "B17", 
   "C1", "C2", "C3", "C4", "C17", 
   "D1", "D2", "D4", 

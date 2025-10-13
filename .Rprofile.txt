@@ -1,0 +1,4 @@
+# Configure Python environment for shinyapps.io
+if (Sys.info()[["sysname"]] == "Linux") {
+  Sys.setenv(RETICULATE_PYTHON = "/usr/bin/python3")
+}

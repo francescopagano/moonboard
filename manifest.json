@@ -394,6 +394,32 @@
         "Archs": "x64"
       }
     },
+    "catboost": {
+      "Source": "URL",
+      "Repository": null,
+      "description": {
+        "Package": "catboost",
+        "Title": "Gradient Boosting on Decision Trees",
+        "Version": "1.2.8",
+        "RoxygenNote": "7.3.2",
+        "Imports": "jsonlite",
+        "License": "Apache License (== 2.0)",
+        "Description": "Open-source gradient boosting on decision trees with categorical\n  features support out of the box.",
+        "Authors@R": "c(\n    person(\"Nikita\", \"Dmitriev\", role = \"aut\"),\n    person(\"Andrey\", \"Gulin\", role = \"aut\",\n      comment = \"Chief researcher, author of the algorithm and of the first implementation\"),\n    person(\"Anna Veronika\", \"Dorogush\", role = \"aut\"),\n    person(\"Stanislav\", \"Kirillov\", role = \"cre\", email = \"staskirillov@gmail.com\"),\n    person(\"Victor\", \"Omelyanenko\", role = \"aut\"),\n    person(\"Evgueni\", \"Petrov\", role = \"aut\"),\n    person(\"Andrey\", \"Mishenko\", role = \"aut\"),\n    person(\"Pavel\", \"Kalinin\", role = \"aut\"),\n    person(\"Vyacheslav\", \"Alipov\", role = \"aut\"),\n    person(\"Egor\", \"Samosvat\", role = \"aut\"),\n    person(\"Alexander\", \"Kobotov\", role = \"aut\"),\n    person(\"Dmitry\", \"Schelchkov\", role = \"aut\"),\n    person(\"Vasily\", \"Ershov\", role = \"aut\",\n      comment = \"GPU implementation\"),\n    person(\"Vyacheslav\", \"Murashkin\", role = \"aut\",\n      comment = \"R Package\"),\n    person(\"Roman\", \"Nefyodov\", role = \"aut\", comment = \"R Package\"),\n    person(\"Anastasia\", \"Bezzubtseva\", role = \"aut\",\n      comment = \"R Package\"),\n    person(\"Alexey\", \"Gorchakov\", role = \"aut\",\n      comment = \"R Package\"),\n    person(\"Ivan\", \"Karev\", role = \"aut\", comment = \"Visualisation\"),\n    person(\"Sergey\", \"Berezhnoy\", role = \"aut\", comment = \"Visualisation\"),\n    person(\"Roman\", \"Rybalchenko\", role = \"aut\", comment = \"Visualisation\"),\n    person(\"Valeriy\", \"Babushkin\", role = \"aut\",\n      comment = \"Tutorials\"),\n    person(\"Mikhail\", \"Pershin\", role = \"aut\",\n      comment = \"Tutorials\"),\n    person(\"Emil\", \"Kayumov\", role = \"aut\",\n      comment = \"Tutorials\"),\n    person(\"Evgeny\", \"Eltyshev\", role = \"aut\", comment = \"Tutorials\"),\n    person(\"Alexander\", \"Baranov\", role = \"aut\", comment = \"CoreML support\"),\n    person(\"Dmitry\", \"Oganesyan\", role = \"aut\",\n      comment = \"R Package\"),\n    person(\"CatBoost DevTeam\", role = c(\"aut\", \"cph\")),\n    person(\"WLOG Solutions\", role = \"ctb\",\n      comment = \"R package preparation for CRAN submission\"),\n    person(\"Dmitry\", \"Baksheev\", role = \"aut\")\n    )",
+        "Author": "CatBoost DevTeam [aut, cre]",
+        "Maintainer": "Andrei Khropov <5002794+andrey-khropov@users.noreply.github.com>",
+        "URL": "https://catboost.ai/, https://github.com/catboost/catboost",
+        "BugReports": "https://github.com/catboost/catboost/issues",
+        "Suggests": "caret, testthat, tibble, e1071",
+        "Biarch": "FALSE",
+        "Encoding": "UTF-8",
+        "RemoteType": "url",
+        "RemoteUrl": "https://github.com/catboost/catboost/releases/download/v1.2.8/catboost-R-windows-x86_64-1.2.8.tgz",
+        "NeedsCompilation": "no",
+        "Packaged": "2025-09-17 18:14:05 UTC; Francesco",
+        "Built": "R 4.5.1; ; 2025-09-17 18:15:13 UTC; windows"
+      }
+    },
     "class": {
       "Source": "CRAN",
       "Repository": "https://cran.rstudio.com",
@@ -3111,7 +3137,7 @@
       "checksum": "05bdb783ee6514c8c072e47680af8ff7"
     },
     "app.R": {
-      "checksum": "43d88f84e811d7f577b9299392cfd4a2"
+      "checksum": "648d625625d4e4ba8fb6f4062e49507f"
     },
     "data/model_colnames.rds": {
       "checksum": "e704f3a9f29c4940f630ff6f94b23d0f"
@@ -3129,7 +3155,10 @@
       "checksum": "84917c9b10eb755a68ee1c11f4873911"
     },
     "global.R": {
-      "checksum": "75f17e544a100734ba429ae511cc9899"
+      "checksum": "464cb7439163d06a23af2317153f202e"
+    },
+    "init.R": {
+      "checksum": "653389a93d4bb5677aa8b61b22414612"
     },
     "models/best.rds": {
       "checksum": "83479d899674c1addeb62fc2913df3c8"
@@ -3155,11 +3184,17 @@
     "python/feature_engineering.py": {
       "checksum": "29481bbf01f1cec8ee6aa1fe0a5da3b2"
     },
+    "requirements.txt": {
+      "checksum": "6461ece0017762479be23eeff411a183"
+    },
+    "Rprofile.txt": {
+      "checksum": "5cd99522581132372940406de00dd2a3"
+    },
     "server.R": {
-      "checksum": "d28bb575ddf189fa7238e01a86b96e90"
+      "checksum": "b10393b25b7b641597fdc5bc177e1c7e"
     },
     "ui.R": {
-      "checksum": "8cb01d3d5798dd33be96761caf0ee07e"
+      "checksum": "d4b0eeba669b2784a512bbcd31dc7746"
     }
   },
   "users": null

@@ -32,7 +32,7 @@ server <- function(input, output, session) {
   ppr1_data <- reactiveVal(NULL)    # Dati specifici per PPR1
   ppr2_data <- reactiveVal(NULL)    # Dati specifici per PPR2
   net_data <- reactiveVal(NULL)     # Dati specifici per NNET
-  #cat_pool <- reactiveVal(NULL)     # Pool per CatBoost
+  cat_pool <- reactiveVal(NULL)     # Pool per CatBoost
   
   majority_vote <- reactiveVal(NULL)
   debug_text <- reactiveVal("")
@@ -65,7 +65,7 @@ server <- function(input, output, session) {
     if(!is.null(ppr1_data())) log_debug(paste("ppr1_data dimensions:", paste(dim(ppr1_data()), collapse="x")))
     if(!is.null(ppr2_data())) log_debug(paste("ppr2_data dimensions:", paste(dim(ppr2_data()), collapse="x")))
     if(!is.null(net_data())) log_debug(paste("net_data dimensions:", paste(dim(net_data()), collapse="x")))
-    #if(!is.null(cat_pool())) log_debug("cat_pool è stato creato.")
+    if(!is.null(cat_pool())) log_debug("cat_pool è stato creato.")
     
     log_debug("=== FINE DEBUG ===")
   })
@@ -145,7 +145,7 @@ server <- function(input, output, session) {
     ppr1_data(NULL)
     ppr2_data(NULL)
     net_data(NULL)
-    #cat_pool(NULL)
+    cat_pool(NULL)
     majority_vote(NULL)
     debug_text("")
     updateRadioButtons(session, "is_benchmark", selected = "False")
@@ -195,13 +195,23 @@ server <- function(input, output, session) {
     df <- data.frame(matrix(0, nrow = 1, ncol = 0))
     
     # Imposta isBenchmark e holdset
-    df$isBenchmark <- factor(input$is_benchmark, levels = levels_map[["isBenchmark"]] %||% c("False", "True"))
+    #df$isBenchmark <- factor(input$is_benchmark, levels = levels_map[["isBenchmark"]] %||% c("False", "True"))
     
     
-    df$holdsets <- factor(input$holdset, levels = levels_map[["holdsets"]] %||% c("Hold Set A", "Hold Set A | Hold Set B", "Hold Set B", 
-                                                                                  "Original School Holds", "Original School Holds | Hold Set A", "Original School Holds | Hold Set A | Hold Set B",
-                                                                                  "Original School Holds | Hold Set B"))
+    #df$holdsets <- factor(input$holdset, levels = levels_map[["holdsets"]] %||% c("Hold Set A", "Hold Set A | Hold Set B", "Hold Set B", 
+                                                                                  #"Original School Holds", "Original School Holds | Hold Set A", "Original School Holds | Hold Set A | Hold Set B",
+                                                                                  #"Original School Holds | Hold Set B"))
     
+    levels_isBenchmark <- if (!is.null(levels_map[["isBenchmark"]])) levels_map[["isBenchmark"]] else c("False", "True")
+    df$isBenchmark <- factor(input$is_benchmark, levels = levels_isBenchmark)
+    
+    levels_holdsets <- if (!is.null(levels_map[["holdsets"]])) levels_map[["holdsets"]] else c(
+      "Hold Set A", "Hold Set A | Hold Set B", "Hold Set B", 
+      "Original School Holds", "Original School Holds | Hold Set A", 
+      "Original School Holds | Hold Set A | Hold Set B", 
+      "Original School Holds | Hold Set B"
+    )
+    df$holdsets <- factor(input$holdset, levels = levels_holdsets)
     df <- cbind(df, base_data)
     
     # Aggiungi TUTTE le prese come colonne binarie
@@ -394,11 +404,11 @@ server <- function(input, output, session) {
       log_debug("==== [DEBUG] Contenuto matrice ====")
       log_debug(paste(capture.output(print(mat)), collapse = "\n"))
       
-      # 4. Crea il pool per CatBoost usando la matrice numerica
-      # if(!is.null(m.cat) && !is.null(mat)) {
-      #   cat_pool(catboost.load_pool(data = mat))
-      #   log_debug("CatBoost pool creato dalla matrice numerica.")
-      # }
+      #4. Crea il pool per CatBoost usando la matrice numerica
+      if(!is.null(m.cat) && !is.null(mat)) {
+        cat_pool(catboost.load_pool(data = mat))
+        log_debug("CatBoost pool creato dalla matrice numerica.")
+      }
       
       output$feature_output <- renderPrint({
         df_features <- features_df()
@@ -433,7 +443,7 @@ server <- function(input, output, session) {
     
     df_p = model_data()
     mat_model <- model_matrix()
-    #pool_cat <- cat_pool()
+    pool_cat <- cat_pool()
     
     tryCatch({
       # PPR 1
@@ -507,18 +517,18 @@ server <- function(input, output, session) {
         })
       }
       # CatBoost
-      # if (!is.null(m.cat) && !is.null(pool_cat)) {
-      #   tryCatch({
-      #     pred <- catboost.predict(m.cat, pool = pool_cat)
-      #     pred <- pmin(pmax(pred, miny), maxy)
-      #     intervals <- conformal_split(y_calib, y_calib_pred_cat, pred, alpha = 0.1)
-      #     model_predictions[["CatBoost"]] <- intervals
-      #     log_debug(paste("Predizione CatBoost:", intervals))
-      #   }, error = function(e) { 
-      #     log_debug(paste("ERRORE predizione CatBoost:", e$message))
-      #     model_predictions[["CatBoost"]] <- NULL
-      #   })
-      # }
+      if (!is.null(m.cat) && !is.null(pool_cat)) {
+        tryCatch({
+          pred <- catboost.predict(m.cat, pool = pool_cat)
+          pred <- pmin(pmax(pred, miny), maxy)
+          intervals <- conformal_split(y_calib, y_calib_pred_cat, pred, alpha = 0.1)
+          model_predictions[["CatBoost"]] <- intervals
+          log_debug(paste("Predizione CatBoost:", intervals))
+        }, error = function(e) {
+          log_debug(paste("ERRORE predizione CatBoost:", e$message))
+          model_predictions[["CatBoost"]] <- NULL
+        })
+      }
       
       valid_preds <- Filter(Negate(is.null), model_predictions)
       

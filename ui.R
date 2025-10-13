@@ -29,7 +29,7 @@ ui <- dashboardPage(
   dashboardBody(
     fluidRow(class = "equal-height",
              # Colonna sinistra: Moonboard
-             column(width = 4,
+             column(width = 6,
                     box(
                       title = "Moonboard:",
                       width = NULL,
