@@ -16,22 +16,18 @@ The app integrates R and Python, enabling interactive exploration, custom proble
 
 ## 📁 Project Structure
 
-├── .git/ # Git version control files
-├── .Rproj.user/ # RStudio project settings
-├── data/ # Data files (Moonboard configuration, problem sets, etc.)
-├── models/ # Saved models or weights (e.g., ML models)
-├── python/ # Python scripts (e.g., data processing, model training)
-├── rsconnect/ # Deployment configuration
-│
-├── .gitattributes # Git attributes
-├── .Rhistory # R session history
-├── .Rprofile # Custom R startup settings
-│
 ├── app.R # Main app entry point
+
 ├── global.R # Global variables, packages, data
+
 ├── init.R # Environment and dependency setup
+
 ├── manifest.json # Deployment manifest
+
 ├── moonboard_app.Rproj # RStudio project file
+
 ├── requirements.txt # Python dependencies
+
 ├── server.R # Shiny server logic
+
 ├── ui.R # Shiny user interface definition
