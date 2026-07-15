@@ -1,0 +1,4495 @@
+---
+title: "Dai che ci siamo"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(dplyr)
+library(sm)
+library(ggplot2)
+library(MASS)
+library(gglasso)
+```
+
+# Import dati:
+
+```{r}
+setwd("C:/Users/Francesco/Documents/uni/tesi/data_expl_analysis")
+
+stima = read.csv("moon_stima.csv", stringsAsFactors = T)
+ver = read.csv("moon_verifica.csv", stringsAsFactors = T)
+```
+
+```{r}
+dim(xmat.model.stima)
+```
+
+```{r}
+str(stima)
+```
+```{r}
+levels(stima$holdsets)
+```
+
+
+```{r}
+#set.seed(1) # rende il campionamento riproducibile, opzionale
+#stima = stima[sample(nrow(stima), nrow(stima)* 0.5), ]
+#ver = ver[sample(nrow(ver), nrow(ver)* 0.5), ]
+```
+
+```{r}
+stima[5:145] <- lapply(stima[5:145], as.factor)
+ver[5:145] <- lapply(ver[5:145], as.factor)
+```
+
+```{r}
+# Ordine desiderato dei livelli
+ordine_livelli <- c("V4", "V5", "V6", "V7", 
+                    "V8", "V9", "V10", "V11", 
+                    "V12", "V13", "V14")
+
+# Trasforma x in un fattore con livelli ordinati
+stima$grade_v <- factor(stima$grade_v, levels = ordine_livelli)
+ver$grade_v = factor(ver$grade_v, levels = ordine_livelli)
+
+levels(stima$grade_v)
+```
+
+
+```{r}
+barplot(table(stima$grade_v)/dim(stima)[1])
+```
+```{r}
+barplot(table(stima$grade)/dim(stima)[1])
+```
+
+```{r}
+round(table(stima$grade_v)/dim(stima)[1], 3)
+round(table(stima$grade)/dim(stima)[1], 3)
+```
+
+# Verifica e rimozione variabili:
+
+```{r}
+tipo_var <- function(dataset){
+  
+  tipo_variabile <- sapply(dataset, class)
+  
+  var_qualitative <- names(dataset)[tipo_variabile == "factor"]
+  var_qualitative <- setdiff(var_qualitative, c("grade", "grade_v", "y"))  # escludi "grade"
+  
+  var_quantitative <- setdiff(names(dataset), c(var_qualitative, c("grade", "grade_v", "y")))  # escludi "grade"
+
+  assign("var_qualitative", var_qualitative, envir = .GlobalEnv)
+  assign("var_quantitative", var_quantitative, envir = .GlobalEnv)
+  
+  cat("VAR QUALITATIVE: \n\n", paste(var_qualitative, collapse = "  "), 
+      "\n\nVAR QUANTITATIVE: \n\n", paste(var_quantitative, collapse = "  "), "\n")
+}
+
+```
+
+```{r}
+tipo_var(stima)
+```
+```{r}
+tipo_var(ver)
+```
+
+#### Verifica correlazioni variabili:
+
+```{r}
+# Seleziona solo le variabili quantitative dal dataset
+dati_quant <- stima[, var_quantitative]
+
+# Calcola la matrice di correlazione
+cor_mat <- cor(dati_quant, use = "complete.obs")
+
+# Trova le coppie con correlazione perfetta (1), evitando la diagonale
+coppie_cor1 <- which(cor_mat == 1 & lower.tri(cor_mat), arr.ind = TRUE)
+
+# Estrai i nomi delle coppie
+coppie_nomi <- data.frame(
+  var1 = rownames(cor_mat)[coppie_cor1[,1]],
+  var2 = colnames(cor_mat)[coppie_cor1[,2]]
+)
+```
+
+```{r}
+# Output
+(coppie_nomi)
+```
+Le variabili con correlazione vanno rimosse 
+-> rimuovo media_loc_u_3_mean, media_loc_u_5_mean, media_loc_g_mean
+
+```{r}
+stima$media_loc_g_mean = NULL
+stima$media_loc_u_3_mean = NULL
+stima$media_loc_u_5_mean = NULL
+
+ver$media_loc_g_mean = NULL
+ver$media_loc_u_3_mean = NULL
+ver$media_loc_u_5_mean = NULL
+```
+
+```{r}
+tipo_var(stima)
+```
+```{r}
+dim(stima)
+dim(ver)
+```
+
+#### Verifica se ci sono variabili degeneri:
+
+##### Var quantitative:
+
+```{r}
+# Calcola la varianza per ogni variabile
+varianze <- sapply(dati_quant, var, na.rm = TRUE)
+
+# Trova quali variabili hanno varianza nulla
+varianza_nulla <- names(varianze[varianze == 0])
+
+cat("\nVariabili con varianza nulla:\n")
+print(varianza_nulla)
+```
+Rimuovo le variabili con varianza pari a 0, sono costanti
+
+```{r}
+stima$media_loc_l_mean = NULL
+ver$media_loc_l_mean = NULL
+```
+
+```{r}
+tipo_var(stima)
+tipo_var(ver)
+```
+
+Trasformare variabili quantitavive in qualitative:
+
+```{r}
+library(dplyr)
+library(purrr)
+
+# Parametri
+yvar <- "y"
+unknown_label <- "unknown"
+threshold_levels <- 5          # <= soglia ⇒ converto in fattore
+exclude_pattern <- "_mean$"    # escludi variabili con questo pattern (oppure NULL)
+
+# Assicurati che var_quantitative sia character
+var_quantitative <- as.character(var_quantitative)
+
+# 0. Rimuovi la variabile risposta se fosse dentro
+var_quantitative <- setdiff(var_quantitative, yvar)
+
+# 1. Tieni solo quelle presenti nel training (stima)
+missing_vars  <- setdiff(var_quantitative, names(stima))
+existing_vars <- intersect(var_quantitative, names(stima))
+
+if (length(missing_vars) > 0) {
+  message("Variabili non trovate in stima (IGNORATE): ", paste(missing_vars, collapse = ", "))
+}
+
+vars_candidate <- existing_vars
+
+# 2. Escludi pattern (se richiesto)
+if (!is.null(exclude_pattern)) {
+  excluded_by_pattern <- grep(exclude_pattern, vars_candidate, value = TRUE)
+  if (length(excluded_by_pattern) > 0) {
+    message("Escludo per pattern '", exclude_pattern, "': ",
+            paste(excluded_by_pattern, collapse = ", "))
+  }
+  vars_candidate <- setdiff(vars_candidate, excluded_by_pattern)
+}
+
+# 3. Determina quali rendere fattori (solo guardando stima)
+vars_to_factor <- vars_candidate[
+  sapply(stima[vars_candidate], function(v) n_distinct(v, na.rm = TRUE) <= threshold_levels)
+]
+
+message("Variabili convertite in factor (<= ", threshold_levels, " valori distinti): ",
+        ifelse(length(vars_to_factor)==0, "<nessuna>", paste(vars_to_factor, collapse = ", ")))
+
+# 4. Rimuovi eventuali variabili completamente NA o costanti (opzionale ma consigliato)
+const_or_all_na <- vars_to_factor[sapply(stima[vars_to_factor], function(v) {
+  vv <- v[!is.na(v)]
+  length(vv) == 0 || length(unique(vv)) <= 1
+})]
+
+if (length(const_or_all_na) > 0) {
+  message("ATTENZIONE: variabili candidate factor ma costanti o tutte NA in stima (le rimuovo): ",
+          paste(const_or_all_na, collapse = ", "))
+  vars_to_factor <- setdiff(vars_to_factor, const_or_all_na)
+}
+
+# 5. Crea levels_map dal training
+levels_map <- lapply(stima[vars_to_factor], function(v) {
+  base_vals <- unique(v)
+  base_chr  <- as.character(base_vals)
+  base_chr  <- base_chr[!is.na(base_chr)]
+  base_chr  <- sort(unique(base_chr))
+  if (!(unknown_label %in% base_chr)) {
+    base_chr <- c(base_chr, unknown_label)
+  }
+  base_chr
+})
+names(levels_map) <- vars_to_factor
+
+# 6. Funzione di trasformazione (usa SOLO levels_map ricavata da stima)
+trasforma <- function(df, levels_map, unknown_label = "unknown") {
+  df %>%
+    mutate(
+      across(
+        any_of(names(levels_map)),
+        ~ {
+          x_chr <- as.character(.x)
+            # NA -> unknown
+          x_chr[is.na(x_chr)] <- unknown_label
+            # Valori non osservati nel training -> unknown
+          allowed <- levels_map[[cur_column()]]
+          x_chr[!x_chr %in% allowed] <- unknown_label
+          factor(x_chr, levels = allowed)  # mantiene livelli del training, anche se assenti
+        }
+      )
+    )
+}
+
+stima <- trasforma(stima, levels_map, unknown_label)
+ver   <- trasforma(ver,   levels_map, unknown_label)
+
+# 7. Diagnostica: verifico che i fattori in ver non abbiano livelli fuori mappa
+check_new_levels <- function(levels_map, newdata) {
+  out <- lapply(names(levels_map), function(v) {
+    if (!v %in% names(newdata)) return(NULL)
+    vals <- unique(as.character(newdata[[v]]))
+    extra <- setdiff(vals, levels_map[[v]])
+    if (length(extra) > 0) {
+      data.frame(var = v, nuovi_valori = paste(extra, collapse=","), stringsAsFactors = FALSE)
+    } else NULL
+  })
+  do.call(rbind, out)
+}
+
+nl <- check_new_levels(levels_map, ver)
+if (!is.null(nl)) {
+  warning("Trovati nuovi valori (cosa anomala perché vengono rimappati a 'unknown'):\n",
+          paste(capture.output(print(nl)), collapse = "\n"))
+}
+
+# 8. (Facoltativo) Report livelli
+level_report <- lapply(names(levels_map), function(v) {
+  data.frame(
+    variabile = v,
+    livelli_training = paste(levels_map[[v]], collapse = "|"),
+    livelli_ver = paste(levels(stima[[v]]), collapse = "|"),
+    stringsAsFactors = FALSE
+  )
+}) %>% bind_rows()
+level_report
+```
+
+```{r}
+tipo_var(stima)
+```
+```{r}
+tipo_var(ver)
+```
+
+##### Var qualitative:
+
+```{r}
+# Calcola il numero di modalità uniche per ogni variabile qualitativa
+n_livelli <- sapply(var_qualitative, function(nome_var) {
+  length(unique(na.omit(stima[[nome_var]])))
+})
+
+# Trova le variabili con una sola modalità
+variabili_degenere <- names(n_livelli[n_livelli == 1])
+
+cat("\nVariabili qualitative con una sola modalità (degeneri):\n")
+print(variabili_degenere)
+```
+
+```{r}
+# Supponiamo di avere due data frame: df1 e df2
+# Verifica che abbiano lo stesso numero di colonne e gli stessi nomi
+
+setequal(names(stima), names(ver))
+```
+
+```{r}
+setdiff(names(stima), names(ver)) # colonne in df1 ma non in df2
+setdiff(names(ver), names(stima)) # colonne in df2 ma non in df1
+```
+```{r}
+sum(is.na(stima))
+sum(is.na(ver))
+```
+```{r}
+cols_con_na <- names(ver)[colSums(is.na(ver)) > 0]
+cols_con_na
+```
+```{r}
+ver <- ver[complete.cases(ver), ]
+```
+
+```{r}
+sum(is.na(stima))
+sum(is.na(ver))
+```
+
+```{r}
+stima$grade = NULL
+ver$grade = NULL
+```
+
+```{r}
+#stima = stima_NONTOCCARE
+#ver = ver_NONTOCCARE
+```
+
+```{r}
+stima_NONTOCCARE = stima
+ver_NONTOCCARE = ver
+```
+
+## Creazione y numerica:
+
+```{r}
+base_multiplier <- 3.17
+
+# Gradi ordinati da 6B+ a 8B+, con unione di 8A/8A+ e 8B/8B+
+grades <- c("V4", "V5", "V6", "V7", 
+            "V8", "V9", "V10", "V11", 
+            "V12", "V13", "V14")
+
+#grades = c("6B/6B+", "6C/6C+", "7A",   
+           #"7A+", "7B/7B+", "7C",
+           #"7C+", "8" )
+
+get_difficulty_scale <- function(grades_vector, base = 3.17, start_exp = 4) {
+  n <- length(grades_vector)
+  exponents <- start_exp:(start_exp + n - 1)
+  difficulties <- base ^ exponents
+  names(difficulties) <- grades_vector
+
+  # Correzione per i gradi uniti (media tra esponenti adiacenti)
+  #idx_8A <- which(grades_vector == "8A/8A+")
+  #difficulties["8A/8A+"] <- base ^ mean(c(exponents[idx_8A - 1], exponents[idx_8A]))
+  #idx_8B <- which(grades_vector == "8B/8B+")
+  #difficulties["8B/8B+"] <- base ^ mean(c(exponents[idx_8B - 1], exponents[idx_8B]))
+
+  difficulties <- round(difficulties, 2)
+  return(difficulties)
+}
+
+# Esegui la funzione
+difficulty_scale <- get_difficulty_scale(grades_vector = grades)
+difficulty_scale
+
+# Esempio di assegnazione nei data frame
+stima$y <- round(log(as.numeric(difficulty_scale[stima$grade_v])), 2)
+ver$y <- round(log(as.numeric(difficulty_scale[ver$grade_v])), 2)
+```
+
+```{r}
+round(log(as.numeric(difficulty_scale)), 2)
+```
+
+## Creazione matrice del modello e std:
+
+```{r}
+stima$grade_v = NULL
+ver$grade_v = NULL
+```
+
+```{r}
+table(stima$y)
+table(ver$y)
+```
+```{r}
+tipo_var(stima)
+```
+```{r}
+tipo_var(ver)
+```
+
+```{r}
+dim(stima)
+dim(ver)
+```
+
+```{r}
+# Lista delle variabili quantitative da standardizzare
+vars_to_scale <- var_quantitative
+
+# Calcolo media e deviazione standard solo su stima
+media_stima <- sapply(stima[ , vars_to_scale], mean, na.rm = TRUE)
+sd_stima    <- sapply(stima[ , vars_to_scale], sd, na.rm = TRUE)
+
+# Funzione di standardizzazione
+standardize <- function(df, means, sds, vars) {
+  df[ , vars] <- scale(df[ , vars], center = means, scale = sds)
+  return(df)
+}
+
+# Standardizza stima e ver usando i parametri di stima
+stima <- standardize(stima, media_stima, sd_stima, vars_to_scale)
+ver <- standardize(ver, media_stima, sd_stima, vars_to_scale)
+```
+
+```{r}
+# 1. Fattori e livelli dal training
+factor_vars <- names(stima)[sapply(stima, is.factor)]
+levels_map  <- lapply(stima[factor_vars], levels)
+
+# 2. Riallina ver
+for (v in factor_vars) {
+  if (v %in% names(ver)) {
+    ver[[v]] <- factor(as.character(ver[[v]]), levels = levels_map[[v]])
+  }
+}
+
+# 3. Fattori a un solo livello nel training
+single_level_train <- factor_vars[sapply(stima[factor_vars], function(x) length(levels(x)) < 2)]
+
+if (length(single_level_train) > 0) {
+  message("Fattori a un solo livello nel training (saranno rimossi): ",
+          paste(single_level_train, collapse = ", "))
+}
+
+# 4. Formula senza i single-level (consigliato)
+predictor_vars <- setdiff(names(stima), c("y", single_level_train))
+form <- as.formula(paste("y ~ -1 +", paste(predictor_vars, collapse = " + ")))
+
+# 5. Model matrices
+xmat.model.stima <- model.matrix(form, data = stima)
+xmat.model.ver   <- model.matrix(form, data = ver)
+
+# 6. Controllo finale
+bad_ver <- names(ver)[sapply(ver, is.factor) & sapply(ver, function(x) length(levels(x)) < 2)]
+if (length(bad_ver) > 0) {
+  message("Ancora factors a 1 livello in ver (probabilmente rimossi dalla formula): ",
+          paste(bad_ver, collapse = ", "))
+}
+```
+
+```{r}
+dim(xmat.model.stima)
+dim(xmat.model.ver)
+```
+
+```{r}
+# Salvo nomi delle variabili:
+varnames <- setdiff(names(stima), "y")
+# Creo formula con tutte le variabili:
+form.tuttevars <- paste("y ~", paste(varnames,collapse = " + "), collapse = NULL)
+# Salvo nomi delle variabili della matrice del modello:
+varnames2 <- colnames(xmat.model.stima)
+```
+
+```{r}
+maxy = max(stima$y)
+miny = min(stima$y)
+
+maxy
+miny
+```
+```{r}
+valori_ammessi = sort(unique(stima$y))
+```
+
+# Metriche di errore e baseline:
+
+```{r}
+# Assicurati che le librerie necessarie siano caricate
+library(irr)
+library(caret)
+
+# --- Funzione f1_macro (invariata ma la includo per completezza) ---
+macro_f1 <- function(y_true, y_pred, levels_ordered) {
+  # Assicura che entrambi siano fattori con gli stessi livelli ordinati
+  y_true <- factor(y_true, levels = levels_ordered)
+  y_pred <- factor(y_pred, levels = levels_ordered)
+  
+  if (length(levels(y_true)) < 2 || length(levels(y_pred)) < 2) {
+    return(0)
+  }
+  
+  # Usiamo un tryCatch per gestire il caso in cui confusionMatrix fallisce
+  # (es. se y_true non ha variabilità)
+  cm_result <- tryCatch({
+    caret::confusionMatrix(y_pred, y_true)
+  }, error = function(e) NULL)
+  
+  if (is.null(cm_result)) return(0)
+  
+  precision_per_class <- cm_result$byClass[,"Pos Pred Value"]
+  recall_per_class <- cm_result$byClass[,"Sensitivity"]
+  
+  F1_per_class <- 2 * precision_per_class * recall_per_class / (precision_per_class + recall_per_class)
+  F1_per_class[is.na(F1_per_class)] <- 0
+  
+  mean(F1_per_class)
+}
+
+
+# --- Funzione m.err (MODIFICATA) ---
+m.err <- function(y_hat, y_oss = ver$y, allowed = valori_ammessi) {
+  
+  # --- 1. METRICHE DI REGRESSIONE (invariate) ---
+  # Calcolate direttamente sui valori continui. Questo è corretto.
+  mse <- mean((y_hat - y_oss)^2)
+  mae <- mean(abs(y_hat - y_oss)) # Usiamo la definizione standard
+  
+  
+  # --- 2. LOGICA DI CLASSIFICAZIONE ORDINALE (NUOVA E CENTRALIZZATA) ---
+  # Questa è la parte fondamentale. Definiamo i "bucket" basati sui valori permessi.
+  
+  # Per sicurezza, ordiniamo i valori permessi.
+  scale_vals <- sort(unique(allowed))
+  K <- length(scale_vals)
+  
+  # Calcoliamo i punti medi, che fungono da soglie di classificazione.
+  midpoints <- (head(scale_vals, -1) + tail(scale_vals, -1)) / 2
+  breaks <- c(-Inf, midpoints, Inf)
+  
+  # Mappiamo i valori continui (veri e predetti) all'INDICE della classe (da 1 a K).
+  # Questo è il cuore del metodo corretto.
+  true_idx <- findInterval(y_oss, breaks, rightmost.closed = TRUE)
+  pred_idx <- findInterval(y_hat, breaks, rightmost.closed = TRUE)
+  
+  # Convertiamo gli indici in etichette/fattori per le altre metriche
+  # (usando i valori `scale_vals` come etichette dei livelli)
+  true_factor <- factor(scale_vals[true_idx], levels = scale_vals)
+  pred_factor <- factor(scale_vals[pred_idx], levels = scale_vals)
+  
+  
+  # --- 3. METRICHE DI CLASSIFICAZIONE (ora basate sulla logica corretta) ---
+  
+  # Accuracy
+  accuracy <- mean(true_idx == pred_idx)
+  
+  # Balanced Accuracy
+  cm <- caret::confusionMatrix(pred_factor, true_factor)
+  balanced_accuracy <- mean(cm$byClass[,"Sensitivity"], na.rm = TRUE)
+  
+  # F1 macro
+  f1 <- macro_f1(true_factor, pred_factor, levels_ordered = scale_vals)
+  
+  # QWK (Quadratic Weighted Kappa)
+  # Ora calcolato sugli INDICI, che è il modo corretto.
+  if (length(unique(pred_idx)) < 2 || length(unique(true_idx)) < 2) {
+    qwk <- NA  # QWK non definibile se non c'è variabilità
+  } else {
+    qwk <- tryCatch({
+      # Usiamo direttamente gli indici numerici (1..K)
+      irr::kappa2(cbind(true_idx, pred_idx), weight = "squared")$value
+    }, warning = function(w) {
+      message("⚠️ Warning in QWK: ", conditionMessage(w))
+      return(NA)
+    }, error = function(e) {
+      message("❌ Errore nel calcolo della QWK: ", conditionMessage(e))
+      return(NA)
+    })
+  }
+  
+  return(c(mse = mse, mae = mae, 
+           acc = accuracy, bacc = balanced_accuracy, 
+           macro_f1 = f1, qwk = qwk))
+}
+```
+
+```{r}
+# Baseline: media
+y_pred_mean <- rep(mean(stima$y), length(ver$y))
+err_mean <- m.err(y_pred_mean, y_oss = ver$y)
+
+# Baseline: mediana
+y_pred_median <- rep(median(stima$y), length(ver$y))
+err_median <- m.err(y_pred_median, y_oss = ver$y)
+
+# Baseline: casuale
+set.seed(123)
+y_pred_random <- sample(stima$y, length(ver$y), replace = TRUE)
+err_random <- m.err(y_pred_random, y_oss = ver$y)
+
+# Creazione tabella riepilogativa
+baseline_results <- data.frame(
+  Modello = c("Baseline_Media", "Baseline_Mediana", "Baseline_Casuale"),
+  MSE = round(c(err_mean["mse"], err_median["mse"], err_random["mse"]), 3),
+  MAE = round(c(err_mean["mae"], err_median["mae"], err_random["mae"]), 3),
+  Accuracy = round(c(err_mean["acc"], err_median["acc"], err_random["acc"]), 3),
+  B_Accuracy = round(c(err_mean["bacc"], err_median["bacc"], err_random["bacc"]), 3),
+  QWK = round(c(err_mean["qwk"], err_median["qwk"], err_random["qwk"]), 3),
+  F1_macro = round(c(err_mean["macro_f1"], err_median["macro_f1"], err_random["macro_f1"]), 3)
+)
+
+print(baseline_results)
+```
+
+```{r}
+sum(is.na(ver$y))               # Quanti NA in ver$y
+sum(is.na(y_pred_random))       # Quanti NA in y_pred_random
+sum(is.na((ver$y - y_pred_random)^2)) # Quanti NA nel risultato
+```
+
+```{r}
+# Trova colonne factor con meno di 2 livelli
+problematiche <- sapply(stima, function(x) is.factor(x) && length(levels(x)) < 2)
+# Mostra i nomi delle variabili problematiche
+names(stima)[problematiche]
+```
+```{r}
+err <- data.frame(Baseline_media = err_mean)
+err$Baseline_Median <- err_median
+err$Baseline_Random <- err_random
+```
+
+```{r}
+round(t(err), 3)
+```
+
+# Modellazione:
+
+```{r}
+dim(stima)
+dim(ver)
+```
+```{r}
+table(stima$y)/dim(stima)[1]
+table(ver$y)/dim(ver)[1]
+```
+
+
+### Regressione lineare
+
+```{r}
+m.lm <- lm(y ~ ., data = stima)
+
+p.lm <- pmin(pmax(predict(m.lm, newdata = ver), miny), maxy)
+```
+
+```{r}
+# Errori:
+err$Lineare = m.err(p.lm)
+t(err)
+```
+
+```{r}
+# Estrai coefficienti (escludendo intercept)
+coefs <- summary(m.lm)$coefficients
+coefs <- coefs[-1, , drop = FALSE]
+
+# Data frame con variabile e beta
+df_coefs_lin <- data.frame(
+  Beta = coefs[, "Estimate"],
+  row.names = rownames(coefs)
+)
+
+# Top 15 positivi
+top_pos_lin <- head(df_coefs_lin[order(-df_coefs_lin$Beta), , drop = FALSE], 15)
+
+# Top 15 negativi
+top_neg_lin <- head(df_coefs_lin[order(df_coefs_lin$Beta), , drop = FALSE], 15)
+
+```
+
+```{r}
+# Imposta nomi delle righe come variabili, solo colonna Beta
+print(top_pos_lin)
+```
+
+```{r}
+print(top_neg_lin)
+```
+
+### Regression Ridge
+
+```{r}
+library(glmnet)
+# Divisione in stima-convalida:
+set.seed(42)
+cb1 <- sample(1:NROW(stima), (2/3)*NROW(stima))
+cb2 <- setdiff(1:NROW(stima), cb1)
+```
+
+```{r}
+# II TIPO: Selezione parametro di regolazione nell'insieme di convalida: ----
+
+lambda.grid <- 10^seq(-8, -4, length = 1000) #guarda grafico plot(m.ridge.conv) e muovila 
+#lambda.grid <- 10^seq(-3,+3,length=100) alternative, guardando m.plot
+m.ridge.conv <- glmnet(xmat.model.stima[cb1,],
+                      stima$y[cb1],
+                      alpha = 0,
+                      lambda = lambda.grid)
+
+# Graficamente - profilo coefficienti al variare di lambda:
+plot(m.ridge.conv, xvar = "lambda", label = T)
+
+#p.lm <- pmin(pmax(predict(m.lm, newdata = ver), 1), 182440.9)
+
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.ridge <- pmin(pmax(predict(m.ridge.conv, newx = xmat.model.stima[cb2,]), miny), maxy)
+errori.ridge <- apply((stima$y[cb2] - p.ridge)^2, 2, mean)
+```
+
+```{r}
+# Graficamente - andamento MSE al variare di lambda:
+#plot(log(m.ridge.conv$lambda), errori.ridge, ylab = "Errore", xlab = expression(log(lambda)))
+# zoom sulla parte interessante del grafico
+plot(log(m.ridge.conv$lambda), errori.ridge, ylab="Errore",
+     xlab=expression(log(lambda)), type="l")
+
+# Qual e' il modello con errore minimo?
+which.min(errori.ridge)
+# e a quale lambda corrisponde?
+lambda.best <- m.ridge.conv$lambda[which.min(errori.ridge)]
+lambda.best
+
+abline(v = log(lambda.best), col = 2, lwd = 2)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.ridge <- pmin(pmax(predict(m.ridge.conv, newx = xmat.model.ver, s = lambda.best), miny), maxy)
+
+# Errori:
+err$Lineare_Ridge = m.err(pred.ridge)
+t(err)
+```
+
+```{r}
+coefs_ridge <- coef(m.ridge.conv, s = lambda.best)
+
+# Trasformo in vettore numerico e tolgo intercept
+coefs_vec <- as.vector(coefs_ridge)[-1]
+names(coefs_vec) <- rownames(coefs_ridge)[-1]
+```
+
+```{r}
+# Creo dataframe con Beta e rownames le variabili
+df_coefs_ridge <- data.frame(
+  Beta = coefs_vec,
+  row.names = names(coefs_vec)
+)
+
+# Top 15 positivi
+top_pos_ridge <- head(df_coefs_ridge[order(-df_coefs_ridge$Beta), , drop = FALSE], 15)
+
+# Top 15 negativi
+top_neg_ridge <- head(df_coefs_ridge[order(df_coefs_ridge$Beta), , drop = FALSE], 15)
+```
+
+```{r}
+print(top_pos_ridge)
+```
+
+```{r}
+print(top_neg_ridge)
+```
+
+### Regressione LASSO
+
+```{r}
+library(glmnet)
+    # - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-10, -4, length = 1000) #guarda grafico plot(m.lasso.conv) e muovila 
+m.lasso.conv <- glmnet(xmat.model.stima[cb1,],
+                       stima$y[cb1],
+                       alpha = 1,
+                       lambda = lambda.grid)
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+plot(m.lasso.conv, "lambda", label = T)
+
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.lasso <- pmin(pmax(predict(m.lasso.conv, newx = xmat.model.stima[cb2,]), miny), maxy)
+errori.lasso <- apply((stima$y[cb2] - p.lasso)^2, 2, mean)
+```
+
+```{r}
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(m.lasso.conv$lambda), errori.lasso, 
+     ylab = "Errore", xlab = expression(log(lambda)), type = "l")
+# zoom sulla parte interessante del grafico
+# plot(log(m.lasso.conv$lambda), errori.lasso, ylab="Errore",
+#      xlab=expression(log(lambda)))
+
+# Qual e' il modello con errore minimo?
+which.min(errori.lasso)
+# e a quale lambda corrisponde?
+lambda.best <- m.lasso.conv$lambda[which.min(errori.lasso)]
+lambda.best
+
+abline(v = log(lambda.best), col = 2, lwd = 2)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+beta_lasso <- m.lasso.conv$beta[,which(m.lasso.conv$lambda == lambda.best)]
+# Variabili selezionate dal lasso:
+varlasso <- varnames2[beta_lasso != 0]
+#varlasso #variabili selezionate dal lasso
+#setdiff(varnames2, varlasso) # variabili non selezionate dal lasso
+length(setdiff(varnames2, varlasso)) 
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.lasso <- pmin(pmax(predict(m.lasso.conv, newx = xmat.model.ver, s = lambda.best), miny), maxy)
+
+# Errori:
+err$Lineare_Lasso = m.err(pred.lasso)
+t(err)
+```
+
+```{r}
+# Estrai coefficienti al lambda scelto
+coefs_lasso <- coef(m.lasso.conv, s = lambda.best)
+
+# Trasforma in vettore numerico escludendo l'intercetta
+coefs_vec <- as.vector(coefs_lasso)[-1]
+names(coefs_vec) <- rownames(coefs_lasso)[-1]
+
+# Crea data frame con Beta e rownames variabile
+df_coefs_lasso <- data.frame(
+  Beta = coefs_vec,
+  row.names = names(coefs_vec)
+)
+
+# Top 15 coefficienti più positivi
+top_pos_lasso <- head(df_coefs_lasso[order(-df_coefs_lasso$Beta), , drop = FALSE], 15)
+
+# Top 15 coefficienti più negativi
+top_neg_lasso <- head(df_coefs_lasso[order(df_coefs_lasso$Beta), , drop = FALSE], 15)
+```
+
+```{r}
+# Stampa i risultati
+print(top_pos_lasso)
+```
+
+```{r}
+print(top_neg_lasso)
+```
+
+### Regressione LASSO adattivo
+
+```{r}
+# - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-8, -4, length = 1000) #guarda grafico plot(m.lasso.conv) e muovila 
+m.lasso_ada.conv <- glmnet(xmat.model.stima[cb1,],
+                           stima$y[cb1],
+                           alpha = 1, lambda = lambda.grid,
+                           penalty.factors = 1/abs(coef(m.ridge)[-1])) #anche con ridge stessi risultati
+
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+plot(m.lasso_ada.conv, "lambda", label = T)
+```
+
+```{r}
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+p.lasso_ada <- pmin(pmax(predict(m.lasso_ada.conv, newx = xmat.model.stima[cb2,]), miny), maxy)
+errori.lasso_ada <- apply((stima$y[cb2] - p.lasso_ada)^2, 2, mean)
+
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(m.lasso_ada.conv$lambda), errori.lasso_ada, 
+     ylab = "Errore", xlab = expression(log(lambda)), type = "l")
+# # zoom sulla parte interessante del grafico
+# plot(log(m.lasso_ada.conv$lambda), errori.lasso_ada, ylab="Errore",
+#      xlab=expression(log(lambda)))
+
+# Qual e' il modello con errore minimo?
+which.min(errori.lasso_ada)
+# e a quale lambda corrisponde?
+lambda.best <- m.lasso_ada.conv$lambda[which.min(errori.lasso_ada)]
+lambda.best
+
+abline(v = log(lambda.best), col = 2, lwd = 2)
+```
+
+```{r}
+beta_lasso_ada <- m.lasso_ada.conv$beta[,which(m.lasso_ada.conv$lambda == lambda.best)]
+# Variabili selezionate dal lasso:
+varlasso_ada <- varnames2[beta_lasso_ada != 0]
+#varlasso_ada #variabili selezionate dal lasso
+length(setdiff(varnames2, varlasso_ada)) # variabili non selezionate dal lasso
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.lasso_ada <- pmin(pmax(predict(m.lasso_ada.conv, 
+                                    newx = xmat.model.ver, s = lambda.best), miny), maxy)
+```
+
+```{r}
+# Errori:
+err$Lineare_Lasso_Adattivo = m.err(pred.lasso_ada)
+t(err)
+```
+
+```{r}
+# Estrai coefficienti al lambda scelto
+coefs_lasso_ada <- coef(m.lasso_ada.conv, s = lambda.best)
+
+# Converti in vettore numerico, escludendo l'intercetta
+coefs_vec <- as.vector(coefs_lasso_ada)[-1]
+names(coefs_vec) <- rownames(coefs_lasso_ada)[-1]
+
+# Crea dataframe con Beta e rownames variabili
+df_coefs_lasso_ada <- data.frame(
+  Beta = coefs_vec,
+  row.names = names(coefs_vec)
+)
+
+# Prendi i top 15 beta più positivi
+top_pos_lasso_ada <- head(df_coefs_lasso_ada[order(-df_coefs_lasso_ada$Beta), , drop = FALSE], 15)
+
+# Prendi i top 15 beta più negativi
+top_neg_lasso_ada <- head(df_coefs_lasso_ada[order(df_coefs_lasso_ada$Beta), , drop = FALSE], 15)
+```
+
+```{r}
+# Stampa i risultati
+print(top_pos_lasso_ada)
+```
+
+```{r}
+print(top_neg_lasso_ada)
+```
+
+### GAM, saturo
+
+```{r}
+tipo_var(stima)
+```
+
+```{r}
+formula.gam1 <- y ~ .
+```
+
+versione con earth:
+
+```{r}
+library(earth)
+# Fit modello additivo puro (degree = 1)
+m.gam <- earth(
+  formula.gam1,
+  data   = stima,
+  degree = 1
+)
+```
+
+```{r}
+# Predizioni su ver
+p.gam <- predict(m.gam, newdata = ver)
+
+# Troncamento nell'intervallo [miny, maxy] (come per il GAM originale)
+p.gam <- pmin(pmax(p.gam, miny), maxy)
+
+# Calcolo errore (stessa funzione usata per gli altri modelli)
+err$Additivo <- m.err(p.gam)
+t(err)
+```
+
+```{r}
+# (Opzionale) visualizzazioni/diagnostica rapide:
+# summary(m.mars)
+evimp(m.gam)
+# plotmo::plotmo(m.mars)
+```
+
+```{r}
+# Coefficienti (include l'intercetta come primo termine: "(Intercept)")
+coefs <- coef(m.gam)   # m.gam è l'oggetto earth
+
+# Rimuovo l'intercetta
+coefs_no_int <- coefs[setdiff(names(coefs), "(Intercept)")]
+
+# Data frame
+df_coefs_earth <- data.frame(
+  term = names(coefs_no_int),
+  Beta = as.numeric(coefs_no_int),
+  row.names = NULL
+)
+
+# Top 15 più positivi
+top_pos_earth <- head(df_coefs_earth[order(-df_coefs_earth$Beta), ], 15)
+
+# Top 15 più negativi
+top_neg_earth <- head(df_coefs_earth[order(df_coefs_earth$Beta), ], 15)
+```
+
+```{r}
+top_pos_earth
+```
+
+```{r}
+top_neg_earth
+```
+
+### GAM, LASSO
+
+```{r}
+tipo_var(stima)
+```
+
+
+```{r}
+#library(gam)
+### Modello Additivo con var selezionate lasso ------------------------------
+
+# DA FARE SOLO SE IL LASSO FA SELEZIONE
+# E SE PROPRIO LA STEP SUCCESSIVA CI METTE TROPPO
+
+# Solo var (quant e qual) selezionate dal lasso
+# Splines di lisciamento con 3gdl equivalenti per tutte le quantitative
+
+# Creazione formula per funzione gam:
+form.gam2 = character(0)
+for (i in 1:length(var_quantitative)){
+    if (var_quantitative[i] %in% varlasso){
+        form.gam2 = c(form.gam2, paste0(var_quantitative[i] ,collapse=NULL))
+    }
+}
+gam.quant = paste0(form.gam2, collapse="+")
+
+gam.qual = paste0(var_qualitative, collapse="+")
+formula.gam2 = as.formula(paste("y~",paste0(c(gam.qual,gam.quant),collapse="+"),collapse = NULL))
+```
+
+```{r}
+formula.gam2
+```
+```{r}
+anyNA(stima)   # restituisce TRUE se ci sono NA
+```
+
+```{r}
+all.vars(formula.gam2) %in% names(stima)
+# Deve restituire solo TRUE
+```
+
+```{r}
+m.gam2 =  earth(
+  formula.gam2,
+  data   = stima,
+  degree = 1
+)
+```
+
+```{r}
+# Previsioni nell'insieme di verifica:
+p.gam2 = pmin(pmax(predict(m.gam2, newdata = ver), miny), maxy)
+
+# Errori:
+err$Additivo_LASSO = m.err(p.gam2)
+t(err)
+```
+```{r}
+# (Opzionale) visualizzazioni/diagnostica rapide:
+# summary(m.mars)
+evimp(m.gam2)
+# plotmo::plotmo(m.mars)
+```
+
+```{r}
+# Coefficienti (include l'intercetta come primo termine: "(Intercept)")
+coefs <- coef(m.gam2)   # m.gam è l'oggetto earth
+
+# Rimuovo l'intercetta
+coefs_no_int <- coefs[setdiff(names(coefs), "(Intercept)")]
+
+# Data frame
+df_coefs_earth_lasso <- data.frame(
+  term = names(coefs_no_int),
+  Beta = as.numeric(coefs_no_int),
+  row.names = NULL
+)
+
+# Top 15 più positivi
+top_pos_earth_lasso <- head(df_coefs_earth_lasso[order(-df_coefs_earth_lasso$Beta), ], 15)
+
+# Top 15 più negativi
+top_neg_earth_lasso <- head(df_coefs_earth_lasso[order(df_coefs_earth_lasso$Beta), ], 15)
+```
+
+```{r}
+top_pos_earth_lasso
+```
+
+```{r}
+top_neg_earth_lasso
+```
+
+### MARS
+
+```{r}
+### MARS --------------------------------------------------------------------
+
+library(polspline)
+# Stima sull'insieme di stima:
+set.seed(42)
+m.mars = polymars(stima$y,
+                  xmat.model.stima)
+
+#in due modi
+#m.mars <- polymars(responses = stima$y, predictors = stima[,-y],
+                     #factors = c(1,2,8)) #indicando quali sono i fattori
+        # se ci mette troppo: diminuire i nodi
+
+# str(m.mars)
+# summary(m.mars)
+#m.mars
+```
+
+```{r}
+summary(m.mars)
+```
+
+
+```{r}
+# fitting: una riga per ogni passo di crescita-1 e di potatura-0, viene
+#           riportata la dimensione del modello (size), la somma dei
+#           quadrati dei residui (RSS) e la convalida incrociata
+#           generalizzata (GCV)
+# model: contine il modello finale, al termine della potatura
+
+# Dimensione del modello (cioe' num. di funz. di base) con GCV minima:
+J3 = m.mars$fitting$size[m.mars$fitting$GCV == min(m.mars$fitting$GCV)]
+
+# Grafico dell'andamento della RSS al variare di size, in fase di crescita
+# e di potatura:
+plot(m.mars$fitting$size, m.mars$fitting$RSS, 
+     col = m.mars$fitting$"0/1"+2, pch = 16, cex = 0.7,
+     xlab = "n. funz. base", ylab = "RSS", main = "Mars")
+legend( "topright", c("In avanti", "All'indietro"), pch = 16,
+        col = unique(m.mars$fitting$"0/1")+2)
+```
+
+```{r}
+# Grafico dell'andamento della RSS al variare di GCV, in fase di crescita
+# e di potatura:
+plot(m.mars$fitting$size, m.mars$fitting$GCV, 
+     col = m.mars$fitting$"0/1"+2, pch = 16, cex = 0.7,
+     xlab = "n. funz. base", ylab = "GCV", main = "Mars")
+legend( "topright", c("In avanti", "All'indietro"), pch = 16,
+        col = unique(m.mars$fitting$"0/1")+2)
+abline(v = J3, col = 5)
+abline(h = min(m.mars$fitting$GCV), col = 5)
+        # Grafico da includere nel report.
+```
+
+```{r}
+# Modello finale:
+m.mars$model
+
+##Grafici
+
+# - non riportare il grafico delle variabili con NA in corrispondenza di knot1
+# - riporta grafico effetti marginali delle var con knot1 diverso da NA ma pred2 = NA
+# - riporta grafico tridimensionale per var con pred2 diverso da NA
+
+#colnames(xmat.model.stima)
+```
+
+```{r}
+# Previsioni sull'insieme di verifica:
+p.mars = pmin(pmax(predict(m.mars, x = xmat.model.ver), miny), maxy)
+
+# Errori:
+err$MARS = m.err(p.mars)
+t(err)
+```
+
+### PPR
+
+```{r}
+?ppr
+```
+
+
+```{r}
+### Regressione Projection Pursuit (PPR) ------------------------------------
+
+# NO INTERPRETABILE
+# LENTA CON DATASET GRANDI
+
+terms = 1:8 # 1:20
+ppr.mse = matrix(NA, nrow = length(terms), ncol = 2)
+
+for (i in 1:length(terms)) {
+    cat("Funzioni dorsali:", terms[i], "\n")
+    set.seed(42)
+    ppr.fits = ppr(formula.gam1,
+                   data = stima[cb1, ],
+                   nterms = terms[i], 
+                   optlevel = 2,
+                   sm.method = "supsmu",
+                   bass = 2)
+    prev = pmin(pmax(predict(ppr.fits, newdata = stima[-cb1, ]), miny), maxy)
+    
+    # Assicurati che y sia un vettore
+    y_ver = stima$y[-cb1]
+    
+    ppr.mse[i, ] = c(terms[i], mean((prev - y_ver)^2))
+}
+```
+```{r}
+plot(ppr.mse, main = "", 
+     xlab = "Funzioni Dorsali", ylab = "MSE", type = "l", col = 2)
+```
+
+```{r}
+M = terms[which.min(ppr.mse[,2])]
+M
+```
+
+```{r}
+set.seed(42)
+m.ppr = ppr(formula.gam1,
+            data = stima,
+            nterms = M, 
+            optlevel = 3,
+            sm.method = "supsmu",
+            bass = 2)
+```
+
+```{r}
+p.ppr = pmin(pmax(predict(m.ppr, newdata = ver), miny), maxy)
+err$PPR = m.err(p.ppr)
+t(err)
+```
+
+```{r}
+### Regressione Projection Pursuit (PPR) ------------------------------------
+
+# NO INTERPRETABILE
+# LENTA CON DATASET GRANDI
+
+terms2 = 1:8 # 1:20
+ppr.mse2 = matrix(NA, nrow = length(terms), ncol = 2)
+
+for (i in 1:length(terms)) {
+    cat("Funzioni dorsali:", terms[i], "\n")
+    set.seed(42)
+    ppr.fits = ppr(formula.gam1,
+                   data = stima[cb1, ],
+                   nterms = terms[i], 
+                   optlevel = 2,
+                   sm.method = "spline",
+                   df = 5)
+    prev = pmin(pmax(predict(ppr.fits, newdata = stima[-cb1, ]), miny), maxy)
+    
+    # Assicurati che y sia un vettore
+    y_ver = stima$y[-cb1]
+    
+    ppr.mse2[i, ] = c(terms2[i], mean((prev - y_ver)^2))
+}
+``` 
+
+```{r}
+plot(ppr.mse2, main = "Errore di previsione - PPR", 
+     xlab = "Funzioni Dorsali", ylab = "MSE", type = "l", col = 2)
+```
+
+```{r}
+M2 = terms2[which.min(ppr.mse2[,2])]
+M2
+```
+
+```{r}
+set.seed(42)
+m.ppr2 = ppr(formula.gam1,
+            data = stima,
+            nterms = M2, 
+            optlevel = 3,
+            sm.method = "spline",
+            df = 5)
+```
+
+```{r}
+p.ppr2 = pmin(pmax(predict(m.ppr2, newdata = ver), miny), maxy)
+err$PPR2 = m.err(p.ppr2)
+t(err)
+```
+```{r}
+# --- 5. Valutazione della Performance e Overfitting ---
+
+# Calcoli le previsioni sul set di validazione ('ver'), come nel tuo script
+cat("\n--- Valutazione della Performance ---\n")
+pred_train_ppr = pmin(pmax(predict(m.ppr, newdata = stima), miny), maxy)
+
+# Calcoliamo l'errore sia su training che su validation
+err_ppr <- list()
+err_ppr$PPR_train <- m.err(pred_train_ppr, stima$y)
+err_ppr$PPR_validation <- m.err(p.ppr, ver$y)
+
+cat("\nErrore sul Training Set vs Validation Set:\n")
+print(t(as.data.frame(err_ppr)))
+
+# Confronto:
+# - Se err$PPR_train è molto più basso di err$PPR_validation, il modello è in overfitting.
+#   Sta memorizzando il rumore dei dati di training.
+#   Soluzioni: ridurre 'nterms' (M), aumentare 'bass' per uno smoothing più forte,
+#   o usare più dati di training.
+# - Se entrambi gli errori sono alti, il modello è in underfitting (troppo semplice).
+#   Soluzioni: aumentare 'nterms' (M).
+
+```
+```{r}
+# --- 5. Valutazione della Performance e Overfitting ---
+
+# Calcoli le previsioni sul set di validazione ('ver'), come nel tuo script
+cat("\n--- Valutazione della Performance ---\n")
+pred_train_ppr2 = pmin(pmax(predict(m.ppr2, newdata = stima), miny), maxy)
+
+# Calcoliamo l'errore sia su training che su validation
+err_ppr2 <- list()
+err_ppr2$PPR_train <- m.err(pred_train_ppr2, stima$y)
+err_ppr2$PPR_validation <- m.err(p.ppr2, ver$y)
+
+cat("\nErrore sul Training Set vs Validation Set:\n")
+print(t(as.data.frame(err_ppr2)))
+
+# Confronto:
+# - Se err$PPR_train è molto più basso di err$PPR_validation, il modello è in overfitting.
+#   Sta memorizzando il rumore dei dati di training.
+#   Soluzioni: ridurre 'nterms' (M), aumentare 'bass' per uno smoothing più forte,
+#   o usare più dati di training.
+# - Se entrambi gli errori sono alti, il modello è in underfitting (troppo semplice).
+#   Soluzioni: aumentare 'nterms' (M).
+
+```
+#### Analisi PPR (1)
+
+##### Imp. Variabili
+
+```{r}
+
+library(irr)
+library(caret)
+# --- 2. Analisi della Struttura Interna del Modello ---
+
+# Usiamo summary() per una visione d'insieme.
+# Mostra i 'goodness-of-fit' per ogni termine aggiunto sequenzialmente.
+# Un valore alto indica che il termine è molto utile.
+cat("\n--- Summary del Modello ---\n")
+print(summary(m.ppr))
+
+# Il summary mostra la frazione di varianza residua spiegata da ogni termine.
+# Se gli ultimi termini spiegano molto poco, potrebbero non essere necessari
+# o indicare overfitting. Potresti provare a ridurre 'nterms' (M).
+```
+```{r}
+# --- 3. Interpretazione e Visualizzazione delle Funzioni di Proiezione ---
+
+# Questa è la parte più importante per l'interpretazione del PPR.
+# Il modello PPR calcola y come: g1(a1*x) + g2(a2*x) + ... + gM(aM*x)
+# Dove 'x' sono i predittori, 'a' sono i pesi (direzioni) e 'g' sono le funzioni non-lineari.
+
+# Il plot() del modello PPR è lo strumento diagnostico principale.
+# Crea un grafico per ognuno degli M termini.
+# Sull'asse X: la proiezione dei dati (alpha' * x)
+# Sull'asse Y: il contributo di quel termine alla previsione (la funzione g)
+cat("\n--- Visualizzazione dei termini del modello ---\n")
+# Aumentiamo i margini per visualizzare meglio i titoli
+#par(mfrow = c(ceiling(M/2), 2), mar = c(4, 4, 2, 1))
+par(mfrow = c(1,1))
+plot(m.ppr, main = "")
+par(mfrow = c(1, 1)) # Reset del layout grafico
+
+# Come leggere i grafici:
+# - Se un grafico di g(x) è una linea retta, il modello ha trovato una relazione lineare in quella direzione.
+# - Se è una curva (sinusoide, parabola, etc.), il modello ha catturato una relazione non-lineare.
+# - Se è una linea piatta (orizzontale), il termine corrispondente ha un contributo nullo o quasi.
+#   Questo può accadere se hai troppi termini (M è troppo grande).
+```
+```{r}
+# Puoi anche ispezionare i pesi (alpha) per capire quali variabili
+# sono importanti in ogni termine.
+cat("\n--- Pesi delle proiezioni (alpha) ---\n")
+print(m.ppr$alpha)
+# Esempio: se nel primo termine (prima colonna), il peso per 'x1' è alto e gli altri sono bassi,
+# significa che la prima funzione non-lineare 'g1' opera principalmente sulla variabile 'x1'.
+# Se i pesi per 'x1' e 'x2' sono entrambi alti, 'g1' opera su una loro combinazione lineare.
+```
+
+```{r}
+# Assicurati che l'oggetto del tuo modello si chiami m.ppr
+# Se si chiama diversamente, sostituisci 'm.ppr' con il nome corretto.
+
+# Estrai la matrice alpha dal modello
+alpha_matrix <- m.ppr$alpha
+
+# Verifica che la matrice esista
+if (is.null(alpha_matrix)) {
+  stop("L'oggetto 'm.ppr' non sembra contenere una matrice 'alpha'. Assicurati che sia un modello ppr valido.")
+}
+
+# Definisci una tolleranza per considerare un valore "vicino a zero"
+# Questo aiuta a catturare valori come 5.55e-17 che sono numericamente zero.
+tolerance <- 1e-3
+
+# Itera su ogni colonna (termine) della matrice alpha
+for (i in 1:ncol(alpha_matrix)) {
+  
+  # Stampa un'intestazione per il termine corrente
+  cat(paste0("\n\n========================================\n"))
+  cat(paste0("      ANALISI PER IL TERMINE ", i, "\n"))
+  cat(paste0("========================================\n"))
+  
+  # Estrai i pesi alpha per il termine corrente
+  term_alphas <- alpha_matrix[, i]
+  
+  # --- Variabili con i pesi positivi più alti ---
+  sorted_pos <- sort(term_alphas, decreasing = TRUE)
+  top_10_pos <- head(sorted_pos[sorted_pos > 0], 10)
+  
+  cat("\n--- Le 10 variabili con alpha POSITIVO più alto ---\n")
+  if (length(top_10_pos) == 0) {
+    cat("Nessuna variabile con alpha positivo rilevante in questo termine.\n")
+  } else {
+    print(top_10_pos)
+  }
+  
+  # --- Variabili con i pesi negativi più alti ---
+  sorted_neg <- sort(term_alphas, decreasing = FALSE)
+  top_10_neg <- head(sorted_neg[sorted_neg < 0], 10)
+  
+  cat("\n--- Le 10 variabili con alpha NEGATIVO più alto (più lontane da zero) ---\n")
+  if (length(top_10_neg) == 0) {
+    cat("Nessuna variabile con alpha negativo rilevante in questo termine.\n")
+  } else {
+    print(top_10_neg)
+  }
+  
+  # --- [NUOVA SEZIONE] Variabili con peso quasi nullo ---
+  
+  # Seleziona le variabili il cui valore assoluto di alpha è inferiore alla tolleranza
+  near_zero_alphas <- term_alphas[abs(term_alphas) < tolerance]
+  
+  cat("\n--- Variabili con alpha vicino a zero (ineinfluenti per questo termine) ---\n")
+  if (length(near_zero_alphas) == 0) {
+    cat("Nessuna variabile con alpha vicino a zero in questo termine.\n")
+  } else {
+    # Stampa le variabili e i loro (piccolissimi) valori di alpha
+    print(near_zero_alphas)
+  }
+}
+```
+##### Errori di Previsione
+
+```{r}
+error_ppr <-  ver$y - p.ppr
+
+# 2. Crea un data frame unico per facilitare le analisi con ggplot2
+analisi_df <- data.frame(
+  reale = ver$y,
+  previsto = p.ppr,
+  errore = error_ppr,
+  reale_factor = as.factor(ver$y) # Utile per i raggruppamenti
+)
+
+cat("--- Analisi dei Residui per il Modello PPR (1) ---\n")
+```
+```{r}
+?plot
+```
+
+```{r}
+# --- 4. Analisi dei Residui ---
+# Calcolo delle previsioni e degli errori
+
+# a) Grafico Residui vs Valori Previsti
+plot(p.ppr, ver$y,
+     main = "",
+     #main = "Residui vs Valori Previsti (PPR (1), Insieme di Verifica)",
+     xlab = "Valori Previsti", ylab = "Valori Osservati",
+     pch = 20)
+```
+```{r}
+library(ggplot2)
+
+ggplot(data = data.frame(y = ver$y, yhat = p.ppr), aes(x = yhat, y = y)) +
+  geom_point(shape = 20) +
+  labs(
+    title = "", # oppure "Residui vs Valori Previsti (PPR (1), Insieme di Verifica)"
+    x = "Valori Previsti",
+    y = "Valori Osservati"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+# b) Analisi specifica
+summary(error_ppr)
+hist(error_ppr, breaks = 20, 
+     main = "",
+     #main = "Distribuzione degli Errori",
+     xlab = "Errore di Previsione (Osservato - Previsto)",
+     ylab = "Frequenza")
+abline(v = 0, col = "red", lty = 2)
+```
+
+```{r}
+# b) Analisi specifica per y > 12 (Invariato)
+cat("\n--- Analisi degli errori per valori estremi (y > 12) ---\n")
+extreme_idx <- which(ver$y > 12)
+summary(error_ppr[extreme_idx])
+hist(error_ppr[extreme_idx], breaks = 20, 
+     main = "",
+     #main = "Distribuzione degli Errori per y > 12",
+     xlab = "Errore di Previsione (Osservato - Previsto)",
+     ylab = "Frequenza")
+abline(v = 0, col = "red", lty = 2)
+```
+
+```{r}
+library(ggplot2)
+plot_boxplot_per_classe <- ggplot(analisi_df, aes(x = reale_factor, y = errore, fill = reale_factor)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+  scale_fill_viridis_d(guide = "none") + # Usa la stessa palette, nasconde la legenda
+  labs(
+    #title = "Distribuzione dei Residui per Classe Reale",
+    #subtitle = "Analisi del bias e dell'incertezza per categoria",
+    x = "Classe Reale",
+    y = "Errore di Previsione"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(plot_boxplot_per_classe)
+```
+
+```{r}
+# c) Grafico Residui vs un campione di Singoli Predittori
+# cat("\n--- Analisi dei Residui vs 10 Predittori Casuali ---\n")
+# num_predittori <- ncol(xmat.model.ver)
+# if (num_predittori > 10) {
+#   set.seed(69) # Per riproducibilità
+#   indici_selezionati <- sample(1:num_predittori, 5)
+#   cat("Selezionate 5 variabili casuali su", num_predittori, "per l'analisi.\n")
+# } else {
+#   indici_selezionati <- 1:num_predittori
+# }
+# 
+# # Imposta layout 5x2
+# par(mfrow = c(1,1))
+# for (i in indici_selezionati) {
+#   var_name <- colnames(xmat.model.ver)[i]
+#   plot(xmat.model.ver[, i], error_ppr,
+#        main = paste("Residui vs", var_name),
+#        xlab = var_name,
+#        ylab = "Residui",
+#        pch = 20, col = rgb(0, 0, 0, 0.3))
+#   abline(h = 0, col = "red", lty = 2)
+# }
+# par(mfrow = c(1, 1)) # Reset layout
+```
+
+#### Analisi PPR (2)
+
+##### Imp. Variabili
+
+```{r}
+# --- 2. Analisi della Struttura Interna del Modello ---
+
+# Usiamo summary() per una visione d'insieme.
+# Mostra i 'goodness-of-fit' per ogni termine aggiunto sequenzialmente.
+# Un valore alto indica che il termine è molto utile.
+cat("\n--- Summary del Modello ---\n")
+print(summary(m.ppr2))
+
+# Il summary mostra la frazione di varianza residua spiegata da ogni termine.
+# Se gli ultimi termini spiegano molto poco, potrebbero non essere necessari
+# o indicare overfitting. Potresti provare a ridurre 'nterms' (M).
+```
+
+```{r}
+# --- 3. Interpretazione e Visualizzazione delle Funzioni di Proiezione ---
+
+# Questa è la parte più importante per l'interpretazione del PPR.
+# Il modello PPR calcola y come: g1(a1*x) + g2(a2*x) + ... + gM(aM*x)
+# Dove 'x' sono i predittori, 'a' sono i pesi (direzioni) e 'g' sono le funzioni non-lineari.
+
+# Il plot() del modello PPR è lo strumento diagnostico principale.
+# Crea un grafico per ognuno degli M termini.
+# Sull'asse X: la proiezione dei dati (alpha' * x)
+# Sull'asse Y: il contributo di quel termine alla previsione (la funzione g)
+cat("\n--- Visualizzazione dei termini del modello ---\n")
+# Aumentiamo i margini per visualizzare meglio i titoli
+par(mfrow = c(1,1))
+plot(m.ppr2, main = "")
+par(mfrow = c(1, 1)) # Reset del layout grafico
+
+# Come leggere i grafici:
+# - Se un grafico di g(x) è una linea retta, il modello ha trovato una relazione lineare in quella direzione.
+# - Se è una curva (sinusoide, parabola, etc.), il modello ha catturato una relazione non-lineare.
+# - Se è una linea piatta (orizzontale), il termine corrispondente ha un contributo nullo o quasi.
+#   Questo può accadere se hai troppi termini (M è troppo grande).
+```
+
+```{r}
+# Assicurati che l'oggetto del tuo modello si chiami m.ppr
+# Se si chiama diversamente, sostituisci 'm.ppr' con il nome corretto.
+
+# Estrai la matrice alpha dal modello
+alpha_matrix <- m.ppr2$alpha
+
+# Verifica che la matrice esista
+if (is.null(alpha_matrix)) {
+  stop("L'oggetto 'm.ppr' non sembra contenere una matrice 'alpha'. Assicurati che sia un modello ppr valido.")
+}
+
+# Definisci una tolleranza per considerare un valore "vicino a zero"
+# Questo aiuta a catturare valori come 5.55e-17 che sono numericamente zero.
+tolerance <- 1e-3
+
+# Itera su ogni colonna (termine) della matrice alpha
+for (i in 1:ncol(alpha_matrix)) {
+  
+  # Stampa un'intestazione per il termine corrente
+  cat(paste0("\n\n========================================\n"))
+  cat(paste0("      ANALISI PER IL TERMINE ", i, "\n"))
+  cat(paste0("========================================\n"))
+  
+  # Estrai i pesi alpha per il termine corrente
+  term_alphas <- alpha_matrix[, i]
+  
+  # --- Variabili con i pesi positivi più alti ---
+  sorted_pos <- sort(term_alphas, decreasing = TRUE)
+  top_10_pos <- head(sorted_pos[sorted_pos > 0], 10)
+  
+  cat("\n--- Le 10 variabili con alpha POSITIVO più alto ---\n")
+  if (length(top_10_pos) == 0) {
+    cat("Nessuna variabile con alpha positivo rilevante in questo termine.\n")
+  } else {
+    print(top_10_pos)
+  }
+  
+  # --- Variabili con i pesi negativi più alti ---
+  sorted_neg <- sort(term_alphas, decreasing = FALSE)
+  top_10_neg <- head(sorted_neg[sorted_neg < 0], 10)
+  
+  cat("\n--- Le 10 variabili con alpha NEGATIVO più alto (più lontane da zero) ---\n")
+  if (length(top_10_neg) == 0) {
+    cat("Nessuna variabile con alpha negativo rilevante in questo termine.\n")
+  } else {
+    print(top_10_neg)
+  }
+  
+  # --- [NUOVA SEZIONE] Variabili con peso quasi nullo ---
+  
+  # Seleziona le variabili il cui valore assoluto di alpha è inferiore alla tolleranza
+  near_zero_alphas <- term_alphas[abs(term_alphas) < tolerance]
+  
+  cat("\n--- Variabili con alpha vicino a zero (ineinfluenti per questo termine) ---\n")
+  if (length(near_zero_alphas) == 0) {
+    cat("Nessuna variabile con alpha vicino a zero in questo termine.\n")
+  } else {
+    # Stampa le variabili e i loro (piccolissimi) valori di alpha
+    print(near_zero_alphas)
+  }
+}
+```
+
+##### Errori di previsione
+
+```{r}
+# Calcolo delle previsioni e degli errori
+error_ppr2 <- ver$y - p.ppr2
+
+# 2. Crea un data frame unico per facilitare le analisi con ggplot2
+analisi_df <- data.frame(
+  reale = ver$y,
+  previsto = p.ppr2,
+  errore = error_ppr2,
+  reale_factor = as.factor(ver$y) # Utile per i raggruppamenti
+)
+
+cat("--- Analisi dei Residui per il Modello PPR(2) ---\n")
+```
+
+```{r}
+# a) Grafico Residui vs Valori Previsti
+plot(p.ppr2, ver$y,
+     #main = "Residui vs Valori Previsti (PPR (2), Insieme di Verifica)",
+     xlab = "Valori Previsti", ylab = "Valori Osservati",
+     pch = 20)
+```
+
+```{r}
+# b) Analisi specifica
+summary(error_ppr2)
+hist(error_ppr2, breaks = 20, 
+     #main = "Distribuzione degli Errori",
+     main = "",
+     xlab = "Errore di Previsione (Osservato - Previsto)",
+     ylab = "Frequenza")
+abline(v = 0, col = "red", lty = 2)
+```
+
+```{r}
+# b) Analisi specifica per y > 12 (Invariato)
+cat("\n--- Analisi degli errori per valori estremi (y > 12) ---\n")
+extreme_idx <- which(ver$y > 12)
+summary(error_ppr2[extreme_idx])
+hist(error_ppr2[extreme_idx], breaks = 20, 
+     #main = "Distribuzione degli Errori per y > 12",
+     main = "",
+     ylab = "Frequenza",
+     xlab = "Errore di Previsione (Osservato - Previsto)")
+abline(v = 0, col = "red", lty = 2)
+```
+
+```{r}
+plot_boxplot_per_classe <- ggplot(analisi_df, aes(x = reale_factor, y = errore, fill = reale_factor)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+  scale_fill_viridis_d(guide = "none") + # Usa la stessa palette, nasconde la legenda
+  labs(
+    #title = "Distribuzione dei Residui per Classe Reale",
+    #subtitle = "Analisi del bias e dell'incertezza per categoria",
+    x = "Classe Reale",
+    y = "Errore di Previsione"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(plot_boxplot_per_classe)
+```
+
+```{r}
+# # c) Grafico Residui vs un campione di Singoli Predittori
+# cat("\n--- Analisi dei Residui vs 10 Predittori Casuali ---\n")
+# num_predittori <- ncol(xmat.model.ver)
+# if (num_predittori > 10) {
+#   set.seed(42) # Per riproducibilità
+#   indici_selezionati <- sample(1:num_predittori, 5)
+#   cat("Selezionate 5 variabili casuali su", num_predittori, "per l'analisi.\n")
+# } else {
+#   indici_selezionati <- 1:num_predittori
+# }
+# 
+# # Imposta layout 5x2
+# par(mfrow = c(1,1))
+# for (i in indici_selezionati) {
+#   var_name <- colnames(xmat.model.ver)[i]
+#   plot(xmat.model.ver[, i], error_ppr2,
+#        main = paste("Residui vs", var_name),
+#        xlab = var_name,
+#        ylab = "Residui",
+#        pch = 20, col = rgb(0, 0, 0, 0.3))
+#   abline(h = 0, col = "red", lty = 2)
+# }
+# par(mfrow = c(1, 1)) # Reset layout
+```
+
+### NN
+
+```{r}
+### Rete Neurale ------------------------------------------------------------
+
+# SOLO CON VARIABILI QUANTITATIVE
+# NO INTERPRETABILE
+
+# numero di nodi nello strato latente fissato pari a 5, ricerca sul  weight decay
+
+library(nnet)
+set.seed(42)
+decay = 10^seq(-4, -2, length = 8) #-4, -2
+nnet.mse = matrix(NA, nrow = length(decay), ncol = 2)
+
+for (i in 1:length(decay)){
+    cat("Decay:", decay[i], "\n")
+    nnet.fits = nnet(y~., data = stima[cb1,],
+                     size = 5, decay = decay[i], linout = T, maxit = 500, MaxNWts = 3000)
+    prev = pmin(pmax(predict(nnet.fits, newdata = stima[-cb1,]), miny), maxy)
+    nnet.mse[i,] = c(decay[i], mean((prev- stima$y[-cb1])^2))  
+}
+```
+
+```{r}
+plot(nnet.mse, type = "l", col = "red", 
+     main = "Errore di previsione - Rete neurale", 
+     xlab = "Weight Decay", ylab = "MSE")
+
+dd = decay[which.min(nnet.mse[,2])]
+```
+
+```{r}
+set.seed(42)
+m.net = nnet(y~., data = stima,
+             size = 5, decay = dd, linout = T, maxit = 2500, MaxNWts = 10000)
+```
+
+```{r}
+# Previsioni sull'insieme di verifica:
+p.net = pmin(pmax(predict(m.net, newdata = ver), miny), maxy)
+
+# Errori:
+err$Neural_Network = m.err(p.net)
+t(err)
+```
+
+### Random Forest
+
+```{r}
+t(err)
+```
+
+```{r}
+### Foresta Casuale ---------------------------------------------------------
+
+
+library(ranger)
+
+# - Se poche variabili:
+#mtry.list <- 1:(ncol(dati)-2)   # (-2 perche' ci sono anche y e dataset)
+# - Se tante variabili:
+mtry.list <- c(5, 10, 25, 50, 100, 150, 200, 250) # ATT: deve essere sempre meno del numero di var!
+
+# Scelgo il numero di variabili migliore in base all'errore OOB:
+errs <- sapply(mtry.list, function(l){
+    set.seed(42)
+    ranger(y~.,
+           data = (stima),mtry = l)$prediction.error
+})
+```
+
+```{r}
+# Grafico 
+plot(mtry.list, errs, main = "mtry vs errors", type = "l",
+     xlab = "Numero variabili campionate per split", ylab = "Errore")
+```
+
+```{r}
+# Stima sull'insieme di stima con mtry ottimo:
+mtry.best <- mtry.list[which.min(errs)]
+mtry.best
+m.ranfo <- ranger(y~.,
+                data = (stima),
+                mtry = mtry.best,
+                importance = "impurity")    # varianza della risposta
+                                            # (nella class: indice di Gini)
+```
+
+```{r, fig.width=10}
+# Importanza delle variabili: 
+m.ranfo$variable.importance   # ATT: non mandarlo se troppe variabili!
+barplot(sort(m.ranfo$variable.importance, dec = T))  # ordine di importanza decrescente
+barplot(sort(m.ranfo$variable.importance, dec = T)[1:10])
+```
+
+```{r}
+# Previsioni sull'insieme di verifica:
+p.ranfo <- predict(m.ranfo, data = ver)$predictions
+# Applica il clipping tra 0 e 13
+p.ranfo <- pmin(pmax(p.ranfo, miny), maxy)
+# Errori:
+err$Random_Forest = m.err(p.ranfo) 
+t(err)
+```
+
+### MCP
+
+```{r}
+library(ncvreg)
+
+# Assumo che queste variabili siano già definite nel tuo ambiente:
+# xmat.model.stima, stima$y, cb1, cb2, miny, maxy
+
+# Griglia di gamma
+gamma.grid_mcp <- c(2, 3, 4, 5, 7, 8, 10, 12, 15, 17, 20, 23, 25, 28, 30)
+
+# Inizializza un dataframe per salvare i risultati
+results_df <- data.frame(
+  gamma = gamma.grid_mcp,
+  min_mse = numeric(length(gamma.grid_mcp)),
+  lambda_best = numeric(length(gamma.grid_mcp)),
+  is_convex = logical(length(gamma.grid_mcp))
+)
+```
+
+```{r}
+for (i in seq_along(gamma.grid_mcp)) {
+  g <- gamma.grid_mcp[i]
+  cat("--------------------------------------------------\n")
+  cat("Calcolo per gamma =", g, "\n")
+  
+  # 1. Fit modello MCP sul set di training (cb1)
+  fit <- ncvreg(xmat.model.stima[cb1,], stima$y[cb1],
+                penalty = "MCP",
+                gamma = g,
+                seed = 876,
+                returnX = FALSE)
+  
+  # 2. Previsioni sul set di validazione (cb2) per tutti i lambda
+  pred <- predict(fit, xmat.model.stima[cb2,])
+  pred <- pmin(pmax(pred, miny), maxy)
+  
+  # Calcolo MSE per ciascun lambda sul set di validazione
+  mse <- apply((stima$y[cb2] - pred)^2, 2, mean)
+  
+  # Trovo il lambda migliore per questo gamma
+  best_idx <- which.min(mse)
+  lambda_best_for_this_gamma <- fit$lambda[best_idx]
+  min_mse_for_this_gamma <- mse[best_idx]
+  
+  # 3. VERIFICA DELLA CONVESSITÀ - approccio analitico
+  # Per MCP/SCAD, la regione è localmente convessa se λ ≥ γ⁻¹λ_max
+  lambda_max <- max(fit$lambda) # il λ più grande (tutti i coeff = 0)
+  convexity_threshold <- lambda_max / g
+  
+  # La soluzione è convessa se lambda_best è maggiore o uguale alla soglia
+  is_solution_convex <- (lambda_best_for_this_gamma >= convexity_threshold)
+  
+  # 4. Disegno il grafico per visualizzazione
+  plot(fit, log.l = TRUE, main = paste("Percorsi MCP per gamma =", g))
+  abline(v = log(lambda_best_for_this_gamma), 
+         col = ifelse(is_solution_convex, "blue", "red"), 
+         lty = 2, lwd = 2)
+  
+  # Aggiungi anche la linea verticale che segna la soglia di convessità
+  abline(v = log(convexity_threshold), col = "green", lty = 3, lwd = 1.5)
+  
+  legend("topright", 
+         legend = c("Lambda Ottimale", 
+                    ifelse(is_solution_convex, "(Convesso)", "(Non-Convesso)"),
+                    "Soglia Convessità"),
+         col = c(ifelse(is_solution_convex, "blue", "red"), "green"), 
+         lty = c(2, 3), lwd = c(2, 1.5), cex = 0.8)
+  
+  cat("  -> MSE minimo su cb2:", round(min_mse_for_this_gamma, 5), "\n")
+  cat("  -> Lambda ottimale:", round(lambda_best_for_this_gamma, 5), "\n")
+  cat("  -> Soglia di convessità:", round(convexity_threshold, 5), "\n")
+  cat("  -> La soluzione è", ifelse(is_solution_convex, "", "NON"), "garantita convessa\n")
+  
+  # Salvo i risultati nel dataframe
+  results_df$min_mse[i] <- min_mse_for_this_gamma
+  results_df$lambda_best[i] <- lambda_best_for_this_gamma
+  results_df$is_convex[i] <- is_solution_convex
+}
+```
+
+```{r}
+cat("==================================================\n")
+cat("\n--- Riepilogo della ricerca ---\n")
+print(results_df)
+```
+
+```{r}
+# --- SELEZIONE FINALE ---
+
+# Filtriamo per tenere solo le soluzioni garantite convesse
+convex_solutions <- results_df[which(results_df$is_convex), ]
+
+if (nrow(convex_solutions) > 0) {
+  # Troviamo la migliore tra le soluzioni convesse
+  best_convex_row <- convex_solutions[which.min(convex_solutions$min_mse), ]
+  
+  best.gamma_final <- best_convex_row$gamma
+  best.lambda_final <- best_convex_row$lambda_best
+  
+  cat("\n--- Scelta Finale (Ottimale e Convessa) ---\n")
+  cat("La migliore soluzione tra quelle garantite convesse è:\n")
+  cat("Gamma ottimale:", best.gamma_final, "\n")
+  cat("Lambda ottimale:", best.lambda_final, "\n")
+  
+} else {
+  cat("\nATTENZIONE: Nessuna delle soluzioni ottimali trovate è garantita essere convessa.\n")
+  cat("La soluzione con l'errore più basso in assoluto potrebbe essere instabile.\n")
+  
+  # In questo caso, potresti decidere di prendere comunque la migliore in assoluto,
+  # ma con la consapevolezza del rischio.
+  best_row_overall <- results_df[which.min(results_df$min_mse), ]
+  best.gamma_final <- best_row_overall$gamma
+  best.lambda_final <- best_row_overall$lambda_best
+  
+  cat("\n--- Scelta di Fallback (Migliore Globale, ma a Rischio) ---\n")
+  cat("Gamma:", best.gamma_final, "\n")
+  cat("Lambda:", best.lambda_final, "\n")
+}
+```
+
+```{r}
+# --- Fit del modello finale con i parametri scelti ---
+# Qui useresti best.gamma_final e best.lambda_final per addestrare il tuo modello
+# finale sull'intero set di stima (se lo desideri) o procedere con le previsioni.
+
+cat("\nAddestramento modello finale con gamma =", best.gamma_final, "e lambda =", best.lambda_final, "\n")
+mcp <- ncvreg(xmat.model.stima, stima$y, 
+                    penalty = "MCP",
+                    gamma = best.gamma_final, 
+                    lambda = best.lambda_final,
+                    returnX = FALSE)
+```
+
+```{r}
+# Previsione sull'insieme di verifica finale
+p.mcp <- pmin(pmax(predict(mcp, xmat.model.ver), miny), maxy)
+err$MCP <- m.err(p.mcp)
+t(err)
+```
+
+```{r}
+beta_mcp <- mcp$beta[,which(mcp$lambda == best.lambda_mcp)]
+#sort(beta_scad[beta_scad!=0])[1:10]
+#sort(beta_scad[beta_scad!=0], decreasing = T)[1:10]
+# Variabili selezionate dal lasso:
+varmcp <- varnames2[beta_mcp != 0]
+#varlasso #variabili selezionate dal lasso
+setdiff(varnames2, varmcp) # variabili non selezionate da mcp
+length(varmcp)
+```
+
+```{r}
+coefs_mcp <- coef(mcp)
+var_names <- names(coefs_mcp)
+coefs_vec <- as.vector(coefs_mcp)
+
+# Escludo l'intercetta
+var_names <- var_names[-1]
+coefs_vec <- coefs_vec[-1]
+```
+
+```{r}
+df_coefs_mcp <- data.frame(
+  Variable = var_names,
+  Beta = coefs_vec
+)
+
+# Top 15 positivi
+top_pos_mcp <- head(df_coefs_mcp[order(-df_coefs_mcp$Beta), ], 15)
+
+# Top 15 negativi
+top_neg_mcp <- head(df_coefs_mcp[order(df_coefs_mcp$Beta), ], 15)
+```
+
+```{r}
+print(top_pos_mcp)
+```
+
+```{r}
+print(top_neg_mcp)
+```
+
+### SCAD
+
+```{r}
+library(ncvreg)
+
+# Assumo che queste variabili siano già definite nel tuo ambiente:
+# xmat.model.stima, stima$y, cb1, cb2, miny, maxy, xmat.model.ver, m.err, err
+
+# Griglia di gamma per SCAD
+gamma.grid_scad <- c(3, 4, 5, 7, 8, 10, 12, 15, 17, 20)
+
+# Inizializza un dataframe per salvare i risultati SCAD
+results_df_scad <- data.frame(
+  gamma = gamma.grid_scad,
+  min_mse = numeric(length(gamma.grid_scad)),
+  lambda_best = numeric(length(gamma.grid_scad)),
+  is_convex = logical(length(gamma.grid_scad))
+)
+```
+
+```{r}
+# For each gamma, fit the SCAD model and check local convexity
+for (i in seq_along(gamma.grid_scad)) {
+  g <- gamma.grid_scad[i]
+  cat("--------------------------------------------------\n")
+  cat("Calcolo per gamma SCAD =", g, "\n")
+  
+  # 1. Fit SCAD model on training set (cb1)
+  fit <- ncvreg(xmat.model.stima[cb1,], stima$y[cb1],
+                penalty = "SCAD",
+                gamma = g,
+                seed = 876,
+                returnX = FALSE)
+  
+  # 2. Predictions on validation set (cb2) for all lambda values
+  pred <- predict(fit, xmat.model.stima[cb2,])
+  pred <- pmin(pmax(pred, miny), maxy)
+  
+  # Calculate MSE for each lambda on validation set
+  mse <- apply((stima$y[cb2] - pred)^2, 2, mean)
+  
+  # Find best lambda for this gamma
+  best_idx <- which.min(mse)
+  lambda_best_for_this_gamma <- fit$lambda[best_idx]
+  min_mse_for_this_gamma <- mse[best_idx]
+  
+  # 3. CHECK LOCAL CONVEXITY
+  # For SCAD, local convexity is guaranteed when lambda > max(eigenvalue)/(g-1)
+  X <- scale(xmat.model.stima[cb1,], center = TRUE, scale = FALSE)
+  XtX <- t(X) %*% X / nrow(X)
+  max_eigenval <- max(eigen(XtX, symmetric = TRUE, only.values = TRUE)$values)
+  convexity_threshold <- max_eigenval / (g - 1)
+  
+  is_solution_convex <- (lambda_best_for_this_gamma >= convexity_threshold)
+  
+  # Display results
+  cat("  -> MSE minimo su cb2:", round(min_mse_for_this_gamma, 5), "\n")
+  cat("  -> Lambda ottimale:", round(lambda_best_for_this_gamma, 5), "\n")
+  cat("  -> Soglia di convessità:", round(convexity_threshold, 5), "\n")
+  cat("  -> La soluzione è localmente convessa?", ifelse(is_solution_convex, "Sì", "No"), "\n")
+  
+  # Save results
+  results_df_scad$min_mse[i] <- min_mse_for_this_gamma
+  results_df_scad$lambda_best[i] <- lambda_best_for_this_gamma
+  results_df_scad$is_convex[i] <- is_solution_convex
+  
+  # 4. VISUALIZATION with the convexity threshold
+  plot(fit, log.l = TRUE, main = paste("Percorsi SCAD per gamma =", g))
+  # Add vertical line for optimal lambda
+  abline(v = log(lambda_best_for_this_gamma), 
+         col = ifelse(is_solution_convex, "blue", "red"), 
+         lty = 2, lwd = 2)
+  # Add vertical line for convexity threshold
+  abline(v = log(convexity_threshold), 
+         col = "darkgreen", lty = 3, lwd = 1)
+  legend("topright", 
+         legend = c(
+           "Lambda Ottimale", 
+           ifelse(is_solution_convex, "(Localmente Convesso)", "(Non Convesso)"),
+           "Soglia di Convessità"
+         ),
+         col = c(ifelse(is_solution_convex, "blue", "red"), "darkgreen"), 
+         lty = c(2, 3), lwd = c(2, 1), cex = 0.8)
+}
+```
+
+```{r}
+cat("==================================================\n")
+cat("\n--- Riepilogo della ricerca per SCAD ---\n")
+print(results_df_scad)
+```
+
+```{r}
+# --- SELEZIONE FINALE ---
+
+# Filtriamo per tenere solo le soluzioni garantite convesse
+convex_solutions_scad <- results_df_scad[which(results_df_scad$is_convex), ]
+
+if (nrow(convex_solutions_scad) > 0) {
+  # Troviamo la migliore tra le soluzioni convesse
+  best_convex_row_scad <- convex_solutions_scad[which.min(convex_solutions_scad$min_mse), ]
+  
+  best.gamma.scad <- best_convex_row_scad$gamma
+  best.lambda.scad <- best_convex_row_scad$lambda_best
+  
+  cat("\n--- Scelta Finale per SCAD (Ottimale e Convessa) ---\n")
+  cat("La migliore soluzione tra quelle garantite convesse è:\n")
+  cat("Gamma ottimale:", best.gamma.scad, "\n")
+  cat("Lambda ottimale:", best.lambda.scad, "\n")
+  
+} else {
+  cat("\nATTENZIONE: Nessuna delle soluzioni ottimali per SCAD è garantita essere convessa.\n")
+  cat("La soluzione con l'errore più basso in assoluto potrebbe essere instabile.\n")
+  
+  best_row_overall_scad <- results_df_scad[which.min(results_df_scad$min_mse), ]
+  best.gamma.scad <- best_row_overall_scad$gamma
+  best.lambda.scad <- best_row_overall_scad$lambda_best
+  
+  cat("\n--- Scelta di Fallback per SCAD (Migliore Globale, ma a Rischio) ---\n")
+  cat("Gamma:", best.gamma.scad, "\n")
+  cat("Lambda:", best.lambda.scad, "\n")
+}
+```
+
+```{r}
+# --- Fit del modello finale e calcolo errori ---
+# Addestriamo il modello finale con i parametri "sicuri" trovati.
+# Lo addestriamo sull'intero set di stima per avere un modello più robusto.
+scad <- ncvreg(xmat.model.stima, stima$y, 
+                     penalty = "SCAD", 
+                     gamma = best.gamma.scad, 
+                     lambda = best.lambda.scad, returnX = FALSE)
+```
+
+```{r}
+# Previsione sull'insieme di verifica finale
+pred.scad <- pmin(pmax(predict(scad, xmat.model.ver), miny), maxy)
+
+# Calcolo degli errori
+err$SCAD <- m.err(pred.scad)
+print(t(err))
+```
+
+```{r}
+beta_scad <- scad$beta
+#sort(beta_scad[beta_scad!=0])[1:10]
+#sort(beta_scad[beta_scad!=0], decreasing = T)[1:10]
+# Variabili selezionate dal lasso:
+varscad <- varnames2[beta_scad != 0]
+#varlasso #variabili selezionate dal lasso
+setdiff(varnames2, varscad) # variabili non selezionate dal lasso
+length(varscad)
+```
+
+```{r}
+# Estrai i coefficienti al lambda scelto
+coefs_scad <- coef(scad)
+
+# Estrai nomi variabili e valori beta, escludendo intercept
+var_names <- names(coefs_scad)[-1]
+coefs_vec <- as.vector(coefs_scad)[-1]
+
+# Crea data frame con variabile e beta
+df_coefs_scad <- data.frame(
+  Variable = var_names,
+  Beta = coefs_vec
+)
+
+# Top 15 coefficienti più positivi
+top_pos_scad <- head(df_coefs_scad[order(-df_coefs_scad$Beta), ], 15)
+
+# Top 15 coefficienti più negativi
+top_neg_scad <- head(df_coefs_scad[order(df_coefs_scad$Beta), ], 15)
+```
+
+```{r}
+# Stampa risultati
+print(top_pos_scad)
+```
+
+```{r}
+print(top_neg_scad)
+```
+
+### Elastic Net
+
+```{r eval=FALSE, include=FALSE}
+    # - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-3, -1, length = 100) #guarda grafico plot(m.lasso.conv) e muovila
+alpha.grid = seq(0, 1, length = 11)
+```
+
+```{r eval=FALSE, include=FALSE}
+library(glmnet)
+results <- expand.grid(lambda = lambda.grid, alpha = alpha.grid)
+results$MSE <- NA
+
+for (i in 1:nrow(results)) {
+  l <- results$lambda[i]
+  a <- results$alpha[i]
+  
+  # Modello Elastic Net
+  fit <- glmnet(xmat.model.stima[cb1,], stima$y[cb1], alpha = a, lambda = l)
+  
+  # Predizione su cb2
+  pred <- pmin(pmax(predict(fit, newx = xmat.model.stima[cb2,], s = l), miny), maxy)
+  
+  # Calcolo MSE
+  results$MSE[i] <- mean((stima$y[cb2] - pred)^2)
+}
+```
+
+```{r}
+best <- results[which.min(results$MSE), ]
+print(best)
+```
+
+```{r eval=FALSE, include=FALSE}
+    # - specifico io la griglia a mano:
+lambda.grid <- 10^seq(-5, 0, length = 100) #guarda grafico plot(m.lasso.conv) e muovila
+alpha.grid = seq(0.25, 0.35, length = 10)
+```
+
+```{r eval=FALSE, include=FALSE}
+results <- expand.grid(lambda = lambda.grid, alpha = alpha.grid)
+results$MSE <- NA
+
+for (i in 1:nrow(results)) {
+  l <- results$lambda[i]
+  a <- results$alpha[i]
+  
+  # Modello Elastic Net
+  fit <- glmnet(xmat.model.stima[cb1,], stima$y[cb1], alpha = a, lambda = l)
+  
+  # Predizione su cb2
+  pred <- pmin(pmax(predict(fit, newx = xmat.model.stima[cb2,], s = l), miny), maxy)
+  
+  # Calcolo MSE
+  results$MSE[i] <- mean((stima$y[cb2] - pred)^2)
+}
+
+```
+
+```{r}
+best <- results[which.min(results$MSE), ]
+print(best)
+```
+
+```{r}
+m.elastic_net <- glmnet(
+  x = xmat.model.stima,
+  y = stima$y,
+  alpha = best$alpha,
+  lambda = best$lambda
+)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.elastic_net <- pmin(pmax(predict(m.elastic_net, 
+                                 newx = xmat.model.ver, s = best$lambda), miny), maxy)
+```
+
+```{r}
+# Errori:
+err$Elastic_Net = m.err(pred.elastic_net)
+t(err)
+```
+
+```{r}
+# Estrai i coefficienti dal modello finale (escludi intercept)
+coefs <- coef(m.elastic_net, s = best$lambda)
+
+# Converti in vettore e ottieni i nomi delle variabili
+coefs_vec <- as.vector(coefs)[-1]  # rimuovi l'intercetta
+var_names <- rownames(coefs)[-1]
+
+# Crea un dataframe con variabili e beta
+df_coefs_final <- data.frame(
+  Variable = var_names,
+  Beta = coefs_vec
+)
+
+# Filtra eventuali coefficienti nulli (opzionale)
+df_coefs_final <- df_coefs_final[df_coefs_final$Beta != 0, ]
+
+# Top 15 positivi
+top_pos_final_en <- head(df_coefs_final[order(-df_coefs_final$Beta), ], 15)
+
+# Top 15 negativi
+top_neg_final_en <- head(df_coefs_final[order(df_coefs_final$Beta), ], 15)
+```
+
+```{r}
+# Stampa i risultati
+print(top_pos_final_en)
+```
+
+```{r}
+print(top_neg_final_en)
+```
+
+### Group Lasso (1)
+```{r}
+library(gglasso)
+```
+
+```{r}
+# # Lista delle variabili singleton (ognuna sarà il proprio gruppo)
+singleton_vars <- c(
+  "A51", "A61", "A91","A101","A111","A121","A131","A141","A151","A161","A181",
+  "B31","B41","B61","B71","B81","B91","B101","B111","B121","B131","B151","B161","B181",
+  "C51","C61","C71","C81","C91","C101","C111","C121","C131","C141","C151","C161","C181",
+  "D31","D51","D61","D71","D81","D91","D101","D111","D121","D131","D141","D151","D161","D171","D181",
+  "E61","E71","E81","E91","E101","E111","E121","E131","E141","E151","E161","E181",
+  "F51","F61","F71","F81","F91","F101","F111","F121","F131","F141","F151","F161",
+  "G21","G41","G61","G71","G81","G91","G101","G111","G121","G131","G141","G151","G161","G171","G181",
+  "H51","H71","H81","H91","H101","H111","H121","H131","H141","H151","H161","H181",
+  "I41","I51","I61","I71","I81","I91","I101","I111","I121","I131","I141","I151","I161","I181",
+  "J21","J51","J61","J71","J81","J91","J101","J111","J121","J131","J141","J161",
+  "K51","K61","K71","K81","K91","K101","K111","K121","K131","K141","K161","K181"
+)
+# Tutte le variabili (come nel tuo dataset, esclusa la y)
+variabili <- colnames(xmat.model.stima) # copia qui tutte le variabili, come nel tuo dataset
+```
+
+```{r}
+get_group <- function(varname) {
+  # Se la variabile è una singleton, il gruppo è la sua posizione nell'elenco singleton + 1 (per non avere 0)
+  if (varname %in% singleton_vars) return(match(varname, singleton_vars)+2)
+  # ... (poi aggiungi qui tutti gli altri raggruppamenti come già discusso: bande, blocchi, statistiche, ecc.)
+
+  if (grepl("^isBenchmark", varname)) return(1)
+  
+  if (grepl("^holdsets", varname)) return(2)
+  # Gruppo 3: Globali (statistiche di posizione/densità/varianza)
+  if (varname %in% c("totale", 
+                     "centroide_y", "centroide_x", 
+                     "var_y", "var_x", 
+                     "diag_1", "diag_2", 
+                     "colonne_usate", "righe_usate")) return(142)
+
+  # Gruppo 4: Simmetrie
+  if (varname %in% c("sim_vert", "sim_oriz")) return(143)
+
+  # Gruppo 5: Statistiche locali
+  if (varname %in% c("media_loc_u_3_std", "media_loc_u_5_std", 
+                     "media_loc_g_std", "media_loc_l_std")) return(144)
+
+  # Gruppo 6: Bande orizzontali (per N)
+  if (grepl("^mean_rowband_2_", varname)) return(145)
+  if (grepl("^mean_rowband_3_", varname)) return(146)
+  if (grepl("^mean_rowband_4_", varname)) return(147)
+  if (grepl("^mean_rowband_6_", varname)) return(148)
+  if (grepl("^mean_rowband_9_", varname)) return(149)
+  if (grepl("^mean_rowband_18_", varname)) return(150)
+
+  # Gruppo 7: Bande verticali (per N)
+  if (grepl("^mean_colband_2_", varname)) return(151)
+  if (grepl("^mean_colband_3_", varname)) return(152)
+  if (grepl("^mean_colband_4_", varname)) return(153)
+  if (grepl("^mean_colband_5_", varname)) return(154)
+  if (grepl("^mean_colband_11_", varname)) return(155)
+
+  # Gruppo 8: Blocchi
+  if (grepl("^blocco3x3_", varname)) return(156)
+  if (grepl("^blocco6x2_", varname)) return(157)
+  if (grepl("^blocco6x4_", varname)) return(158)
+  if (grepl("^blocco9x4_", varname)) return(159)
+  if (grepl("^blocco6x3_", varname)) return(160)
+  if (grepl("^blocco9x2_", varname)) return(161)
+
+  # Gruppo 9: Statistiche avanzate
+  if (varname %in% c("skew_y", "skew_x", "entropy")) return(162)
+  if (varname %in% c("n_clusters", "mean_cluster_size", "max_cluster_size", "clusters_per_hold")) return(163)
+  if (varname == "max_density_3x3") return(164)
+  if (varname %in% c("bbox_h", "bbox_w", "aspect_ratio")) return(165)
+  if (varname %in% c("switch_righe", "switch_colonne")) return(166)
+  return(9999)
+}
+
+grp <- sapply(variabili, get_group)
+head(grp, 10)
+tail(grp, 10)
+```
+```{r}
+gruppi_ordinati <- match(grp, unique(grp))
+gruppi_ordinati
+length(gruppi_ordinati)
+```
+
+```{r}
+length(grp)
+
+#lambda.grid.gg <- 10^seq(-4, 0, length = 100) #guarda grafico plot(m.lasso.conv) e muovila
+    # - specifico io la griglia a mano:
+```
+
+
+```{r}
+library(gglasso)
+m.gglasso.conv = gglasso(xmat.model.stima[cb1,], stima$y[cb1],
+                         group = gruppi_ordinati, loss = "ls", nlambda = 100)
+# Graficamente - profilo coefficienti al variare della norma L1:
+plot(m.gglasso.conv, label = T)
+
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+```
+
+```{r}
+p.gglasso <- pmin(pmax(predict(m.gglasso.conv, newx = xmat.model.stima[cb2,]), miny), maxy)
+errori.gglasso <- apply((stima$y[cb2] - p.gglasso)^2, 2, mean)
+```
+
+
+```{r}
+#Graficamente - andamento MSE al variare di lambda:
+plot(log(m.gglasso.conv$lambda), errori.gglasso, ylab = "Errore", xlab = expression(log(lambda)))
+# zoom sulla parte interessante del grafico
+
+# Qual e' il modello con errore minimo?
+which.min(errori.gglasso)
+# e a quale lambda corrisponde?
+lambda.best.gg <- m.gglasso.conv$lambda[which.min(errori.gglasso)]
+lambda.best.gg
+
+abline(v = log(lambda.best.gg), col = 2, lwd = 2)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+beta_gglasso <- m.gglasso.conv$beta[,which(m.gglasso.conv$lambda == lambda.best.gg)]
+# Variabili selezionate dal lasso:
+vargglasso <- varnames2[beta_gglasso != 0]
+#varlasso #variabili selezionate dal lasso
+#setdiff(varnames2, varlasso) # variabili non selezionate dal lasso
+length(setdiff(varnames2, vargglasso))
+```
+```{r}
+m.gglasso.conv = gglasso(xmat.model.stima, stima$y, 
+                         group = gruppi_ordinati, loss = "ls", lambda = lambda.best.gg)
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+#plot(m.gglasso.conv, label = T)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.gglasso <- pmin(pmax(predict(m.gglasso.conv, newx = xmat.model.ver, s = lambda.best.gg), miny), maxy)
+
+# Errori:
+err$Lineare_GG_Lasso = m.err(pred.gglasso)
+t(err)
+```
+
+```{r}
+# Estrai i coefficienti (puoi specificare la lambda che ti interessa, ad esempio la minima)
+# Supponiamo di voler usare la soluzione per la prima lambda del grid:
+beta = coef(m.gglasso.conv, s = lambda.best.gg)
+
+# beta è un oggetto di classe "dgCMatrix", lo convertiamo in un vettore
+beta_vec = as.vector(beta)
+names(beta_vec) = rownames(beta)
+
+# Rimuovi l'intercetta se presente
+beta_vec = beta_vec[names(beta_vec) != "(Intercept)"]
+
+# Ordina i coefficienti
+beta_sorted = sort(beta_vec, decreasing = TRUE)
+
+# Prendi i 15 più alti
+top15_gglasso = head(beta_sorted, 15)
+
+# Prendi i 15 più bassi
+bottom15_gglasso = tail(beta_sorted, 15)
+```
+
+```{r}
+# Stampa i risultati con nome variabile e valore
+cat("Top 15 beta:\n")
+print(top15_gglasso)
+```
+
+```{r}
+cat("\nBottom 15 beta:\n")
+print(bottom15_gglasso)
+```
+
+### Group Lasso (2)
+
+```{r}
+# Supponiamo che vars sia il vettore dei nomi variabili
+vars <- colnames(xmat.model.stima)  # <-- inserisci qui il vettore completo
+# Supponi di avere già il vettore vars
+# vars <- c("userRating", ..., "switch_colonne")
+
+grp3 <- rep(NA_integer_, length(vars))
+names(grp3) <- vars
+current_group <- 1
+
+benchmark <- c("isBenchmark")
+for (pref in benchmark) {
+  idx <- grep(paste0("^", pref), vars)
+  if (length(idx) > 0) {
+    grp3[idx] <- current_group
+    current_group <- current_group + 1
+  }
+}
+
+hold <- c("holdsets")
+for (pref in hold) {
+  idx <- grep(paste0("^", pref), vars)
+  if (length(idx) > 0) {
+    grp3[idx] <- current_group
+    current_group <- current_group + 1
+  }
+}
+
+# 1. Gruppi blocchi generici (ognuno 4 variabili: mean, centroide_y, centroide_x, var)
+pattern <- "^blocco\\d+x\\d+_\\d+_\\d+"
+blocchi <- unique(gsub("(_mean|_var)", "", vars[grepl(pattern, vars)]))
+for (b in blocchi) {
+  idx <- which(vars %in% paste0(b, c("_mean","_var")))
+  if (length(idx) > 0) {
+    grp3[idx] <- current_group
+    current_group <- current_group + 1
+  }
+}
+
+# 2. Gruppo: Globali (statistiche di posizione/densità/varianza)
+globali <- c("totale", "centroide_y", "centroide_x", "var_y", "var_x", "diag_1", "diag_2", "colonne_usate", "righe_usate")
+idx <- which(vars %in% globali)
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+# 3. Gruppo: Simmetrie
+simmetrie <- c("sim_vert", "sim_oriz")
+idx <- which(vars %in% simmetrie)
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+# 4. Gruppo: Statistiche locali
+locali <- c("media_loc_u_3_std", "media_loc_u_5_std", "media_loc_g_std", "media_loc_l_std")
+idx <- which(vars %in% locali)
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+# 5. Gruppi: Bande orizzontali (per N)
+band_row_prefix <- c("mean_rowband_2_", "mean_rowband_3_", "mean_rowband_4_", "mean_rowband_6_", "mean_rowband_9_", "mean_rowband_18_")
+for (pref in band_row_prefix) {
+  idx <- grep(paste0("^", pref), vars)
+  if (length(idx) > 0) {
+    grp3[idx] <- current_group
+    current_group <- current_group + 1
+  }
+}
+
+# 6. Gruppi: Bande verticali (per N)
+band_col_prefix <- c("mean_colband_2_", "mean_colband_3_", "mean_colband_4_", "mean_colband_5_", "mean_colband_11_")
+for (pref in band_col_prefix) {
+  idx <- grep(paste0("^", pref), vars)
+  if (length(idx) > 0) {
+    grp3[idx] <- current_group
+    current_group <- current_group + 1
+  }
+}
+
+# 7. Statistiche avanzate: skew, entropy, cluster, density, bbox, switch
+idx <- which(vars %in% c("skew_y", "skew_x", "entropy"))
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+idx <- which(vars %in% c("n_clusters", "mean_cluster_size", "max_cluster_size", "clusters_per_hold"))
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+idx <- which(vars == "max_density_3x3")
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+idx <- which(vars %in% c("bbox_h", "bbox_w", "aspect_ratio"))
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+idx <- which(vars %in% c("switch_righe", "switch_colonne"))
+if (length(idx) > 0) {
+  grp3[idx] <- current_group
+  current_group <- current_group + 1
+}
+
+# 8. Le restanti variabili (non ancora assegnate) finiscono in gruppi singoli
+for (i in seq_along(grp3)) {
+  if (is.na(grp3[i])) {
+    grp3[i] <- current_group
+    current_group <- current_group + 1
+  }
+}
+
+# Ora grp3 parte da 1 e la numerazione è progressiva
+names(grp3) <- vars
+head(grp3, 10)
+tail(grp3, 10)
+```
+
+```{r}
+gruppi_ordinati3 <- match(grp3, unique(grp3))
+gruppi_ordinati3
+length(gruppi_ordinati3)
+```
+
+```{r}
+#lambda.grid.gg <- 10^seq(-6, 0, length = 100) #guarda grafico plot(m.lasso.conv) e muovila
+    # - specifico io la griglia a mano:
+```
+
+
+```{r}
+m.gglasso.conv = gglasso(xmat.model.stima[cb1,], stima$y[cb1], 
+                         group = gruppi_ordinati3, loss = "ls", nlambda = 100)
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+plot(m.gglasso.conv, label = T)
+
+# Calcolo errori di previsione sull'insieme di convalida per ciascun valore
+# del parametro di regolazione lambda:
+```
+
+```{r}
+p.gglasso3 <- pmin(pmax(predict(m.gglasso.conv, newx = xmat.model.stima[cb2,]), miny), maxy)
+errori.gglasso3 <- apply((stima$y[cb2] - p.gglasso3)^2, 2, mean)
+```
+
+
+```{r}
+# Graficamente - andamento MSE al variare di lambda:
+plot(log(m.gglasso.conv$lambda), errori.gglasso3, ylab = "Errore", xlab = expression(log(lambda)))
+
+# Qual e' il modello con errore minimo?
+which.min(errori.gglasso3)
+# e a quale lambda corrisponde?
+lambda.best.gg3 <- m.gglasso.conv$lambda[which.min(errori.gglasso3)]
+lambda.best.gg3
+
+abline(v = log(lambda.best.gg3), col = 2, lwd = 2)
+    ### Grafico da includere nel report. ###
+```
+
+```{r}
+beta_gglasso3 <- m.gglasso.conv$beta[,which(m.gglasso.conv$lambda == lambda.best.gg3)]
+# Variabili selezionate dal lasso:
+vargglasso3 <- varnames2[beta_gglasso3 != 0]
+#varlasso #variabili selezionate dal lasso
+#setdiff(varnames2, varlasso) # variabili non selezionate dal lasso
+length(setdiff(varnames2, vargglasso3)) 
+```
+
+```{r}
+m.gglasso.conv = gglasso(xmat.model.stima, stima$y, 
+                         group = gruppi_ordinati3, loss = "ls", lambda = lambda.best.gg3)
+
+# Graficamente - profilo coefficienti al variare della norma L1:
+#plot(m.gglasso.conv, label = T)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.gglasso3 <- pmin(pmax(predict(m.gglasso.conv, newx = xmat.model.ver, s = lambda.best.gg3), miny), maxy)
+
+# Errori:
+err$Lineare_GG_Lasso3 = m.err(pred.gglasso3)
+t(err)
+```
+
+```{r}
+# Estrai i coefficienti (puoi specificare la lambda che ti interessa, ad esempio la minima)
+# Supponiamo di voler usare la soluzione per la prima lambda del grid:
+beta = coef(m.gglasso.conv, s = lambda.best.gg3)
+
+# beta è un oggetto di classe "dgCMatrix", lo convertiamo in un vettore
+beta_vec = as.vector(beta)
+names(beta_vec) = rownames(beta)
+
+# Rimuovi l'intercetta se presente
+beta_vec = beta_vec[names(beta_vec) != "(Intercept)"]
+
+# Ordina i coefficienti
+beta_sorted = sort(beta_vec, decreasing = TRUE)
+
+# Prendi i 15 più alti
+top15_gglasso2 = head(beta_sorted, 15)
+
+# Prendi i 15 più bassi
+bottom15_gglasso2 = tail(beta_sorted, 15)
+```
+
+```{r}
+top15_gglasso2
+```
+
+```{r}
+bottom15_gglasso2
+```
+
+### Group MCP
+
+```{r}
+library(grpreg)
+
+# Define the grid for gamma
+gamma.grid_mcp <- c(1.5, 2, 3, 5, 8, 10, 15, 20, 30, 50)
+
+# Create a validation fold index based on cb1 and cb2
+# The test fold will be '1', training fold will be '2'
+fold <- rep(2, length(stima$y)) # Assign all to training fold 2
+fold[cb2] <- 1                  # Assign cb2 to test fold 1
+
+# Initialize lists to store results
+cv_fits <- list()
+min_errors <- numeric(length(gamma.grid_mcp))
+```
+
+```{r}
+# Loop over gamma to perform cross-validation for each
+for (i in seq_along(gamma.grid_mcp)) {
+  g <- gamma.grid_mcp[i]
+  cat("Running CV for gamma =", g, "\n")
+  
+  # Use cv.grpreg with the predefined fold
+  # This is much more efficient than a manual loop
+  cv_fit <- cv.grpreg(
+    X = xmat.model.stima,
+    y = stima$y,
+    group = gruppi_ordinati3,
+    penalty = "grMCP",
+    gamma = g,
+    fold = fold,
+    returnX = TRUE # Important for plotting
+  )
+  
+  # Store results
+  cv_fits[[i]] <- cv_fit
+  min_errors[i] <- min(cv_fit$cve)
+}
+
+# Find the best gamma based on minimum cross-validation error
+best_gamma_idx <- which.min(min_errors)
+best_gamma_mcpg <- gamma.grid_mcp[best_gamma_idx]
+best_cv_fit <- cv_fits[[best_gamma_idx]]
+
+# Extract the optimal lambda using both 'lambda.min' and 'lambda.1se'
+best_lambda_min_mcpg <- best_cv_fit$lambda.min
+best_lambda_1se_mcpg <- best_cv_fit$lambda.1se
+```
+
+```{r}
+cat("Best gamma:", best_gamma_mcpg, "\n")
+cat("Optimal lambda (min rule):", best_lambda_min_mcpg, "\n")
+cat("Optimal lambda (1-SE rule):", best_lambda_1se_mcpg, "\n")
+```
+
+```{r}
+# Plot the results
+plot(gamma.grid_mcp, min_errors, type = "b", pch = 19,
+     xlab = expression(gamma), ylab = "Minimum Validation MSE",
+     main = "Tuning Gamma for Group MCP")
+abline(v = best_gamma_mcpg, col = "red", lty = 2, lwd = 2)
+legend("topright", "Best Gamma", col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# We choose the more conservative lambda from the 1-SE rule
+final_lambda <- best_lambda_min_mcpg
+final_gamma <- best_gamma_mcpg
+
+cat("Proceeding with final model: gamma =", final_gamma, "and lambda =", final_lambda, "\n")
+```
+
+
+```{r}
+#vediamo se aumento gamma, più vado verso LASSO
+mcp_g = grpreg(xmat.model.stima, stima$y, 
+               penalty = "grMCP", group = gruppi_ordinati3,
+               gamma = final_gamma, lambda = final_lambda)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+p.mcp_g <- pmin(pmax(predict(mcp_g, xmat.model.ver), miny), maxy)
+```
+
+```{r}
+# Errori:
+err$Group_MCP = m.err(p.mcp_g)
+t(err)
+```
+
+```{r}
+# Estrai i coefficienti per la lambda scelta
+beta = coef(mcp_g)
+
+# beta è un vettore, il nome di ogni coefficiente è il nome della variabile
+# Elimina l'intercetta se presente (tipicamente "(Intercept)")
+beta = beta[names(beta) != "(Intercept)"]
+
+# Ordina i coefficienti
+beta_sorted = sort(beta, decreasing = TRUE)
+
+# 15 più alti
+top15_mcpg = head(beta_sorted, 15)
+
+# 15 più bassi
+bottom15_mcpg = tail(beta_sorted, 15)
+```
+
+```{r}
+# Stampa con nome variabile e valore
+cat("Top 15 beta:\n")
+print(top15_mcpg)
+```
+
+```{r}
+cat("\nBottom 15 beta:\n")
+print(bottom15_mcpg)
+```
+
+### Group SCAD
+
+```{r}
+library(grpreg)
+
+# Define the grid for gamma. The theoretical lower bound for grSCAD is 2.
+# Your grid is good. Let's start it slightly closer to the bound.
+gamma.grid_scad <- c(2.5, 3, 4, 5, 8, 10, 15)
+
+# Create a validation fold index based on your cb1/cb2 split
+# Fold '1' will be the validation set (cb2)
+fold <- rep(2, length(stima$y)) # Assign all to training fold '2'
+fold[cb2] <- 1                  # Assign cb2 to validation fold '1'
+
+# Initialize lists to store results
+cv_fits_scad <- list()
+min_errors_scad <- numeric(length(gamma.grid_scad))
+```
+
+```{r}
+# Loop over gamma to perform cross-validation for each
+for (i in seq_along(gamma.grid_scad)) {
+  g <- gamma.grid_scad[i]
+  cat("Running CV for gamma =", g, "\n")
+  
+  # Use cv.grpreg with the predefined fold for efficiency
+  cv_fit <- cv.grpreg(
+    X = xmat.model.stima,
+    y = stima$y,
+    group = gruppi_ordinati3,
+    penalty = "grSCAD",
+    gamma = g,
+    fold = fold
+  )
+  
+  # Store results
+  cv_fits_scad[[i]] <- cv_fit
+  min_errors_scad[i] <- min(cv_fit$cve)
+}
+
+# Find the best gamma based on minimum validation error
+best_gamma_idx <- which.min(min_errors_scad)
+best_gamma_scadg <- gamma.grid_scad[best_gamma_idx]
+best_cv_fit_scad <- cv_fits_scad[[best_gamma_idx]]
+
+# Extract the optimal lambda using both 'lambda.min' and 'lambda.1se'
+best_lambda_min_mcpg <- best_cv_fit_scad$lambda.min
+best_lambda_1se_scadg <- best_cv_fit_scad$lambda.1se
+```
+
+```{r}
+cat("Best gamma:", best_gamma_scadg, "\n")
+cat("Optimal lambda (min rule):", best_lambda_min_scadg, "\n")
+cat("Optimal lambda (1-SE rule):", best_lambda_1se_scadg, "\n")
+```
+
+```{r}
+# Plot the tuning results for gamma
+plot(gamma.grid_scad, min_errors_scad, type = "b", pch = 19,
+     xlab = expression(gamma), ylab = "Minimum Validation MSE",
+     main = "Tuning Gamma for Group SCAD")
+abline(v = best_gamma_scadg, col = "red", lty = 2, lwd = 2)
+legend("topright", "Best Gamma", col = "red", lty = 2, lwd = 2)
+```
+
+
+```{r}
+# We choose the more parsimonious lambda from the "one standard error" rule for robustness
+final_lambda_scad <- best_lambda_min_mcpg
+final_gamma_scad <- best_gamma_scadg
+
+cat("Proceeding with final model: gamma =", final_gamma_scad, "and lambda =", final_lambda_scad, "\n")
+```
+
+
+```{r}
+#vediamo se aumento gamma, più vado verso LASSO
+scad_g = grpreg(xmat.model.stima, stima$y, 
+               penalty = "grSCAD", group = gruppi_ordinati3,
+               gamma = final_gamma_scad, lambda = final_lambda_scad)
+
+#plot(scad, log=T) #diminuisce la finestra grigia, abbiamo percorsi più lunghi e 
+#lisci dei coeff
+
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+p.scad_g <- pmin(pmax(predict(scad_g, xmat.model.ver), miny), maxy)
+```
+
+```{r}
+# Errori:
+err$Group_SCAD = m.err(p.scad_g)
+t(err)
+```
+
+```{r}
+# Estrai i coefficienti per la lambda scelta
+beta = coef(scad_g)
+
+# beta è un vettore, il nome di ogni coefficiente è il nome della variabile
+# Elimina l'intercetta se presente (tipicamente "(Intercept)")
+beta = beta[names(beta) != "(Intercept)"]
+
+# Ordina i coefficienti
+beta_sorted = sort(beta, decreasing = TRUE)
+
+# 15 più alti
+top15_scadg = head(beta_sorted, 15)
+
+# 15 più bassi
+bottom15_scadg = tail(beta_sorted, 15)
+```
+
+```{r}
+# Stampa con nome variabile e valore
+cat("Top 15 beta:\n")
+print(top15_scadg)
+```
+
+```{r}
+cat("\nBottom 15 beta:\n")
+print(bottom15_scadg)
+```
+
+### Fused Lasso
+
+```{r}
+# Costruzione oggetti pixel
+n_row <- 18
+n_col <- 11
+n_pixel <- n_row * n_col
+
+letters_col <- LETTERS[1:n_col] # A-K
+pixel_names <- as.vector(sapply(letters_col, function(l) paste0(l, 1:n_row))) # Lunghezza: 198
+
+pixels_spenti_names <- c('A1', 'A2', 'A3', 'A4', 'A7', 'A8', 'A17', #8
+                         'B1', 'B2', 'B5', 'B14', 'B17', #5
+                         'C1', 'C2', 'C3', 'C4', 'C17', #5
+                         'D1', 'D2', 'D4', #3
+                         'E1', 'E2', 'E3', 'E4', 'E5', 'E17', #6
+                         'F1', 'F2', 'F3', 'F4', 'F17', 'F18', #6
+                         'G1', 'G3', 'G5', #3
+                         'H1', 'H2', 'H3', 'H4', 'H6', 'H17', #6
+                         'I1', 'I2', 'I3', 'I17', #4
+                         'J1', 'J3', 'J4', 'J15', 'J17', 'J18', #6
+                         'K1', 'K2', 'K3', 'K4', 'K15', 'K17') #6
+
+pixels_spenti <- match(pixels_spenti_names, pixel_names)
+pixels_presenti <- setdiff(1:n_pixel, pixels_spenti)
+n_pixel_attivi <- length(pixels_presenti)
+
+pixels_spenti
+cat("\n")
+pixels_presenti
+```
+
+```{r}
+# Funzione penalità fused lasso tra pixel attivi
+make_fused_lasso_D_bottom_up <- function(n_row, n_col, active_pixels) {
+  # Crea la matrice degli indici con convenzione riga 1 = in basso
+  pixel_mat <- matrix(1:(n_row*n_col), nrow = n_row, ncol = n_col)
+  
+  # Funzione per convertire (riga dal basso, colonna) in indice
+  get_index <- function(row_from_bottom, col) {
+    row_from_top <- n_row - row_from_bottom + 1
+    pixel_mat[row_from_top, col]
+  }
+  
+  D_list <- list()
+  for (row_from_bottom in 1:n_row) {
+    for (col in 1:n_col) {
+      idx <- get_index(row_from_bottom, col)
+      if (idx %in% active_pixels) {
+        # Vicino a destra
+        if (col < n_col) {
+          idx_r <- get_index(row_from_bottom, col + 1)
+          if (idx_r %in% active_pixels) {
+            v <- rep(0, length(active_pixels))
+            v[which(active_pixels == idx)] <- 1
+            v[which(active_pixels == idx_r)] <- -1
+            D_list[[length(D_list) + 1]] <- v
+          }
+        }
+        # Vicino sopra (dal basso)
+        if (row_from_bottom < n_row) {
+          idx_u <- get_index(row_from_bottom + 1, col)
+          if (idx_u %in% active_pixels) {
+            v <- rep(0, length(active_pixels))
+            v[which(active_pixels == idx)] <- 1
+            v[which(active_pixels == idx_u)] <- -1
+            D_list[[length(D_list) + 1]] <- v
+          }
+        }
+      }
+    }
+  }
+  D_mat <- do.call(rbind, D_list)
+  return(D_mat)
+}
+```
+
+
+```{r}
+pixels_presenti
+```
+
+```{r}
+# Costruzione matrice D
+n_esplicative <- ncol(xmat.model.stima) - n_pixel_attivi
+
+D_pixel_attivi <- make_fused_lasso_D_bottom_up(n_row, n_col, pixels_presenti)
+
+n_var_pre_pixel <- 9
+n_pixel_attivi <- ncol(D_pixel_attivi)
+n_var <- ncol(xmat.model.stima) # X = tua matrice delle variabili esplicative
+n_var_post_pixel <- n_var - n_var_pre_pixel - n_pixel_attivi
+
+D <- cbind(
+  matrix(0, nrow = nrow(D_pixel_attivi), ncol = n_var_pre_pixel),
+  D_pixel_attivi,
+  matrix(0, nrow = nrow(D_pixel_attivi), ncol = n_var_post_pixel)
+)
+
+dim(D)
+```
+
+```{r}
+# Stima Fused Lasso
+library(genlasso)
+fit <- genlasso(stima$y[cb1], xmat.model.stima[cb1,], D, approx = T)
+```
+
+```{r}
+# Selezione lambda ottimale su validation set
+pred_val <- sapply(1:length(fit$lambda), function(i) {
+  pred <- xmat.model.stima[cb2, ] %*% coef(fit, lambda=fit$lambda[i])$beta
+  pred <- pmax(pmin(pred, maxy), miny) # taglia sopra e sotto
+  return(pred)
+})
+
+mse_val <- apply(pred_val, 2, function(yhat) mean((stima$y[cb2] - yhat)^2))
+lambda_opt <- fit$lambda[which.min(mse_val)]
+beta_est <- coef(fit, lambda=lambda_opt)$beta
+
+# Test set
+pred_fuse <- pmin(pmax((xmat.model.ver %*% beta_est), miny), maxy)
+mse_test <- mean((ver$y - pred_fuse)^2)
+
+cat("MSE validation:", round(min(mse_val), 4), "\n")
+cat("MSE test:", round(mse_test, 4), "\n")
+```
+
+```{r}
+(beta_est[1:25])
+```
+
+```{r}
+err$Fused_Lasso = m.err(pred_fuse)
+t(err)
+```
+
+```{r}
+# Visualizzazione coefficienti pixel (heatmap)
+beta_pixel_full <- rep(NA, n_pixel)
+beta_pixel_full[pixels_presenti] <- beta_est[10:149]
+
+# Dataframe per ggplot
+df_est <- expand.grid(row = 1:n_row, col = 1:n_col)
+df_est$value <- beta_pixel_full
+df_est$pixel_type <- ifelse(is.na(df_est$value), "spento", "attivo")
+
+beta_pixel_full
+```
+
+```{r}
+library(ggplot2)
+ggplot(df_est, aes(x = col, y = row, fill = value)) + # row = 1 in basso, row = 18 in alto
+  geom_tile(aes(alpha = pixel_type), color = "black") +
+  scale_alpha_manual(values = c("spento" = 0.1, "attivo" = 1), guide = FALSE) +
+  scale_x_continuous(breaks = 1:n_col, labels = letters_col) +
+  scale_y_continuous(breaks = 1:n_row, labels = as.character(1:n_row)) +
+  labs(title = paste0("Coefficienti pixel stimati (fused lasso 2D)", n_row, "x", n_col),
+       x = "Colonna", y = "Riga", fill = "Coefficiente") +
+  theme_minimal() +
+  coord_fixed()
+```
+
+```{r}
+# Indici delle variabili esplicative (numeriche + fattoriali)
+beta_expl <- beta_est
+names_expl <- colnames(xmat.model.stima)
+```
+
+```{r}
+# Top 15 positivi
+ord_pos <- order(beta_expl, decreasing = TRUE)[1:10]
+cat("Top 15 variabili con beta più grande:\n")
+print(data.frame(variabile = names_expl[ord_pos], beta = round(beta_expl[ord_pos], 3)))
+```
+
+```{r}
+# Top 15 negativi (cioè più piccoli)
+ord_neg <- order(beta_expl)[1:10]
+cat("Top 15 variabili con beta più grande in negativo:\n")
+print(data.frame(variabile = names_expl[ord_neg], beta = round(beta_expl[ord_neg], 5)))
+```
+
+### XGBoost
+
+```{r}
+library(xgboost)
+```
+
+```{r}
+# Parametri
+params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  max_depth = 10,
+  eta = 0.01,
+  subsample = 0.5,
+  colsample_bytree = 0.5,
+  gamma = 1,
+  lambda = 1,
+  alpha = 0.5
+)
+# Peso 5 alle osservazioni > 12
+```
+
+```{r}
+# Usa model.matrix per ottenere solo variabili numeriche
+# rimuove l'intercetta
+y <- stima$y
+weights <- ifelse(y[cb1] > 11, 15, 1)
+
+dtrain <- xgb.DMatrix(data = xmat.model.stima[cb1, ], label = y[cb1], weight = weights)
+dvalid <- xgb.DMatrix(data = xmat.model.stima[cb2, ], label = y[cb2])
+
+
+
+# Imposta la watchlist
+watchlist <- list(train = dtrain, valid = dvalid)
+```
+
+
+```{r}
+# Addestramento con validation set e early stopping
+m.xgb <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 5000, # metti un valore alto, userai early stopping
+  watchlist = watchlist,
+  early_stopping_rounds = 50, # interrompi se non migliora su valid per 20 iterazioni
+  verbose = 1
+)
+```
+
+```{r}
+importance_matrix <- xgb.importance(model = m.xgb)
+xgb.plot.importance(importance_matrix, top_n = 25, 
+                    measure = "Gain", rel_to_first = TRUE, 
+                    xlab = "Relative Importance")
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.xgboost <- pmin(pmax(predict(m.xgb, xmat.model.ver), miny), maxy)
+error_xgb <- pred.xgboost - ver$y
+```
+
+```{r}
+# Analizza gli errori per y_test > soglia
+extreme_idx <- which(ver$y > 12)
+summary(error_xgb[extreme_idx])
+```
+```{r}
+# library(SHAPforxgboost)
+# shap_values <- shap.prep(xgb_model = m.xgb, X_train = xmat.model.ver)
+# shap.plot.summary(shap_values$shap_score)
+```
+
+```{r}
+# Errori:
+err$XGBoost = m.err(pred.xgboost)
+t(err)
+```
+
+#### Analisi XGBoost
+
+```{r}
+# --- 2. Analisi della Convergenza e Overfitting (Invariato) ---
+# Questa analisi non dipende dal numero di variabili.
+cat("\n--- Analisi della Curva di Apprendimento ---\n")
+training_log <- m.xgb$evaluation_log
+plot(training_log$iter, training_log$train_rmse, type = "l", col = "blue",
+     main = "Curva di Apprendimento XGBoost",
+     xlab = "Numero di Iterazioni", ylab = "RMSE",
+     ylim = range(c(training_log$train_rmse, training_log$valid_rmse)))
+lines(training_log$iter, training_log$valid_rmse, type = "l", col = "red")
+legend("topright", legend = c("Training RMSE", "Validation RMSE"), col = c("blue", "red"), lty = 1)
+abline(v = m.xgb$best_iteration, col = "green", lty = 2, lwd = 2)
+text(m.xgb$best_iteration, max(training_log$valid_rmse), paste("Best Iteration:", m.xgb$best_iteration), pos = 2)
+```
+
+```{r}
+# --- 3. Importanza Globale delle Variabili (Invariato) ---
+# Questa funzione è già perfetta per l'alta dimensionalità,
+# perché si concentra sulle variabili più importanti.
+cat("\n--- Analisi dell'Importanza delle Variabili (Top 25) ---\n")
+importance_matrix <- xgb.importance(model = m.xgb)
+print(head(importance_matrix, 25))
+```
+
+```{r}
+xgb.plot.importance(importance_matrix, top_n = 25, 
+                    measure = "Gain", rel_to_first = TRUE, 
+                    xlab = "Relative Importance", main = "Importanza delle Variabili (Gain)")
+```
+
+
+```{r}
+# --- 4. Analisi dei Residui ---
+# Calcolo delle previsioni e degli errori
+pred.xgboost<- pmin(pmax(predict(m.xgb, xmat.model.ver), miny), maxy)
+error_xgb <- pred.xgboost - ver$y
+
+# a) Grafico Residui vs Valori Previsti (Invariato)
+plot(pred.xgboost, error_xgb,
+     main = "Residui vs Valori Previsti (XGBoost, Verification Set)",
+     xlab = "Valori Previsti", ylab = "Residui",
+     pch = 20, col = rgb(0, 0, 1, 0.5))
+abline(h = 0, col = "red", lty = 2)
+```
+
+```{r}
+# b) Analisi specifica per y > 12 (Invariato)
+cat("\n--- Analisi degli errori per valori estremi (y > 12) ---\n")
+extreme_idx <- which(ver$y > 12)
+summary(error_xgb[extreme_idx])
+hist(error_xgb[extreme_idx], breaks = 20, 
+     main = "Distribuzione degli Errori per y > 12",
+     xlab = "Errore di Previsione (Predetto - Reale)")
+abline(v = 0, col = "red", lty = 2)
+```
+
+```{r}
+# c) [MODIFICATO] Grafico Residui vs un campione di Singoli Predittori
+cat("\n--- Analisi dei Residui vs 10 Predittori Casuali ---\n")
+num_predittori <- ncol(xmat.model.ver)
+if (num_predittori > 10) {
+  set.seed(42) # Per riproducibilità
+  indici_selezionati <- sample(1:num_predittori, 10)
+  cat("Selezionate 10 variabili casuali su", num_predittori, "per l'analisi.\n")
+} else {
+  indici_selezionati <- 1:num_predittori
+}
+
+# Imposta layout 5x2
+par(mfrow = c(2,2), mar = c(4, 4, 2, 1))
+for (i in indici_selezionati) {
+  var_name <- colnames(xmat.model.ver)[i]
+  plot(xmat.model.ver[, i], error_xgb,
+       main = paste("Residui vs", var_name),
+       xlab = var_name,
+       ylab = "Residui",
+       pch = 20, col = rgb(0, 0, 0, 0.3))
+  abline(h = 0, col = "red", lty = 2)
+}
+par(mfrow = c(1, 1)) # Reset layout
+```
+
+
+```{r}
+# --- 5a. [SOLUZIONE ROBUSTA] Ricostruzione manuale del Grafico di Riepilogo SHAP ---
+
+# Carica i pacchetti necessari per la manipolazione dati e il plotting
+library(ggplot2)
+library(data.table)
+library(ggbeeswarm)
+
+cat("\n--- Preparazione manuale dei dati per il Riepilogo SHAP (Top 25) ---\n")
+
+# 1. Estrai i valori SHAP e i valori delle variabili
+shap_long <- shap.prep(m.xgb, X_train = xmat.model.ver, top_n = 25)
+
+# Se la linea sopra dà errore (a causa di 'top_n'), usa questo approccio alternativo:
+# if (!"shap_long" %in% ls()) {
+#   shap_long_all <- shap.prep(m.xgb, X_train = xmat.model.ver)
+#   
+#   # Calcola le top 25 variabili
+#   mean_abs_shap <- colMeans(abs(as.data.frame(shap_long_all$shap_score)))
+#   top_vars_names <- names(sort(mean_abs_shap, decreasing = TRUE))[1:min(25, length(mean_abs_shap))]
+#   
+#   # Filtra manualmente i dati per le top 25
+#   shap_long <- shap_long_all[variable %in% top_vars_names]
+# }
+
+
+# 2. Ordina i fattori per l'asse Y in base all'importanza media
+#    (in modo che la variabile più importante sia in alto)
+setorderv(shap_long, "variable", shap_long[, mean(abs(value))], order = -1)
+
+
+# 3. Crea il grafico con ggplot2
+cat("\n--- Creazione del grafico SHAP con ggplot2 ---\n")
+
+p_shap_summary <- ggplot(shap_long, aes(x = value, y = factor(variable, levels = unique(variable)))) +
+  # Aggiunge un "effetto jitter" per creare il "bee swarm plot"
+  ggbeeswarm::geom_quasirandom(
+    groupOnX = FALSE, 
+    varwidth = TRUE, 
+    size = 1.2, 
+    alpha = 0.7,
+    # Mappa il valore della variabile originale al colore
+    aes(color = stdfvalue) 
+  ) +
+  # Aggiunge una linea verticale a 0 (impatto nullo)
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  # Scala di colori da blu (basso) a rosso (alto)
+  scale_color_gradient(
+    low = "#0072B2", # Blu
+    high = "#D55E00", # Rosso
+    name = "Valore della \nVariabile",
+    guide = guide_colorbar(barwidth = 1, barheight = 12)
+  ) +
+  # Etichette e titolo
+  labs(
+    y = "Variabile",
+    x = "Valore SHAP (impatto sulla previsione del modello)",
+    title = "Riepilogo SHAP: Impatto delle Variabili sulle Previsioni"
+  ) +
+  # Tema pulito
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    legend.position = "right"
+  )
+
+# Stampa il grafico
+print(p_shap_summary)
+
+```
+
+```{r}
+# --- 6. Punti di Forza e Debolezza (Sintesi) ---
+# La logica di sintesi rimane la stessa. Basati sui grafici che hai generato.
+
+# PUNTI DI FORZA:
+# - Performance: Il confronto degli errori (`t(err)`) ti dirà se XGBoost è superiore.
+# - Rilevanza delle variabili: Anche con 300+ predittori, `xgb.plot.importance` e `shap.plot.summary`
+#   identificano chiaramente un sottoinsieme di variabili che guidano il modello.
+# - Comprensione delle relazioni: I grafici di dipendenza SHAP (anche se su un campione)
+#   ti permettono di capire il *come* e il *perché* di alcune relazioni non-lineari e interazioni.
+
+# PUNTI DEBOLI:
+# - Complessità e interpretabilità parziale: Nonostante SHAP, non potrai mai ispezionare
+#   l'effetto di *tutte* le 300 variabili. La tua comprensione sarà sempre focalizzata
+#   sulle più importanti, il che è un compromesso necessario.
+# - Pattern nascosti nei residui: L'analisi dei residui su 10 variabili casuali potrebbe
+#   non rivelare un problema legato a una delle 290+ non campionate. È un'analisi
+#   esplorativa, non esaustiva.
+# - Stabilità delle feature importance: Con molte variabili, specialmente se correlate,
+#   la lista delle "top 25" potrebbe cambiare leggermente rieseguendo il modello.
+#   Tuttavia, le variabili veramente dominanti tendono a rimanere stabili.
+```
+
+### XGBoost Random Search
+
+```{r}
+library(xgboost)
+# --- Impostazione di una Random Search più LEGGERA ---
+
+# 1. Riduciamo il numero di combinazioni totali
+n_combinations <- 100 # << RIDOTTO DA 50 A 25
+
+# 2. Crea un data frame per salvare i risultati (come prima)
+random_search_results <- data.frame(
+  max_depth = integer(n_combinations),
+  eta = numeric(n_combinations),
+  subsample = numeric(n_combinations),
+  colsample_bytree = numeric(n_combinations),
+  gamma = numeric(n_combinations),
+  lambda = numeric(n_combinations),
+  alpha = numeric(n_combinations),
+  min_rmse = numeric(n_combinations),
+  best_nrounds = integer(n_combinations)
+)
+```
+
+```{r}
+# Usa model.matrix per ottenere solo variabili numeriche
+# rimuove l'intercetta
+y <- stima$y
+weights <- ifelse(y[cb1] > 11, 15, 1)
+weights2 <- ifelse(y > 11, 15, 1)
+
+dtrain <- xgb.DMatrix(data = xmat.model.stima[cb1, ], label = y[cb1], weight = weights)
+dvalid <- xgb.DMatrix(data = xmat.model.stima[cb2, ], label = y[cb2])
+
+dstima = xgb.DMatrix(data = xmat.model.stima, label = y, weight = weights2)
+
+# Imposta la watchlist
+watchlist <- list(train = dtrain, valid = dvalid)
+```
+
+```{r}
+print(paste("Avvio della Random Search LEGGERA per", n_combinations, "combinazioni..."))
+set.seed(40)
+
+# 3. Ciclo di Random Search modificato
+for (i in 1:n_combinations) {
+  
+  params <- list(
+    
+    objective = "reg:squarederror",
+    eval_metric = "rmse",
+    
+    # Range di profondità ridotto per risparmiare memoria
+    max_depth = sample(3:10, 1),
+    
+    eta = 0.01,
+    subsample = runif(1, min = 0.5, max = 1.0),
+    colsample_bytree = runif(1, min = 0.5, max = 1.0),
+    
+    # Aumentiamo la probabilità di testare gamma più alti
+    gamma = rexp(1, rate = 0.8),
+    
+    lambda = 10^runif(1, -2, 1),
+    alpha = 10^runif(1, -2, 1)
+  )
+  
+  m.xgb.rand <- xgb.train(
+    params = params,
+    data = dtrain,
+    nrounds = 3000,
+    watchlist = watchlist,
+    early_stopping_rounds = 25,
+    verbose = 0
+  )
+  
+  # Salva i risultati
+  random_search_results$max_depth[i] <- params$max_depth
+  random_search_results$eta[i] <- params$eta
+  # ... (copia il resto delle assegnazioni come prima)
+  random_search_results$subsample[i] <- params$subsample
+  random_search_results$colsample_bytree[i] <- params$colsample_bytree
+  random_search_results$gamma[i] <- params$gamma
+  random_search_results$lambda[i] <- params$lambda
+  random_search_results$alpha[i] <- params$alpha
+  random_search_results$min_rmse[i] <- min(m.xgb.rand$evaluation_log$valid_rmse)
+  random_search_results$best_nrounds[i] <- m.xgb.rand$best_iteration
+  
+  # --- GESTIONE DELLA MEMORIA ---
+  rm(m.xgb.rand) # Rimuovi l'oggetto modello
+  gc()           # Forza la pulizia della memoria
+  # -----------------------------
+  
+  if (i %% 10 == 0) { # Aggiorna più spesso
+    print(paste("Completate", i, "/", n_combinations, "combinazioni. Miglior RMSE finora:", round(min(random_search_results$min_rmse[1:i]), 5)))
+  }
+}
+```
+
+```{r}
+# Trova e stampa la migliore combinazione (come prima)
+print("Random Search completata.")
+best_combination <- random_search_results[which.min(random_search_results$min_rmse), ]
+print("Migliore combinazione di iperparametri trovata:")
+print(best_combination)
+```
+
+```{r}
+# 5. (Opzionale) Addestra il modello finale con i parametri migliori
+# Usa tutti i dati di training (se vuoi) e il numero ottimale di round
+best_params <- as.list(best_combination[1, 1:7]) # Prende solo i parametri
+best_params$objective <- "reg:squarederror"
+best_params$eval_metric <- "rmse"
+```
+
+```{r}
+set.seed(42)
+m.xgb.analysis = xgb.train(
+  params = best_params,
+  data = dtrain,
+  watchlist = watchlist,
+  early_stopping_rounds = 15,
+  nrounds = 800,
+  verbose = 0
+)
+```
+
+```{r}
+# --- 2. Analisi della Convergenza e Overfitting (Invariato) ---
+# Questa analisi non dipende dal numero di variabili.
+cat("\n--- Analisi della Curva di Apprendimento ---\n")
+training_log <- m.xgb.analysis$evaluation_log
+plot(training_log$iter, training_log$train_rmse, type = "l", col = "blue",
+     #main = "Curva di Apprendimento XGBoost",
+     main = "",
+     xlab = "Numero di Iterazioni", ylab = "RMSE",
+     ylim = range(c(training_log$train_rmse, training_log$valid_rmse)))
+lines(training_log$iter, training_log$valid_rmse, type = "l", col = "red")
+legend("topright", legend = c("RMSE - Stima", "RMSE - Convalida"), col = c("blue", "red"), lty = 1)
+#abline(v = m.xgb.analysis$best_iteration, col = "green", lty = 2, lwd = 2)
+
+#text(m.xgb.analysis$best_iteration, max(training_log$valid_rmse), paste("Best Iteration:", m.xgb.analysis$best_iteration), pos = 2)
+```
+
+```{r}
+# best_iteration_from_tuning = m.xgb.analysis$best_iteration
+# # Dimensione del set di training usato nel tuning
+# n_train <- nrow(dtrain) 
+# 
+# # Dimensione del dataset finale
+# n_final <- nrow(dstima)
+# 
+# # Calcolo del nuovo numero di iterazioni
+# scaling_factor <- n_final / n_train
+# new_nrounds <- round(best_iteration_from_tuning * scaling_factor)
+# new_nrounds
+```
+
+
+```{r}
+set.seed(42)
+m.xgb.r <- xgb.train(
+  params = best_params,
+  data = dstima,
+  nrounds = 3000,
+  verbose = 1
+)
+```
+
+```{r}
+# Previsione sull'insieme di verifica:
+pred.xgboost.r <- pmin(pmax(predict(m.xgb.r, xmat.model.ver), miny), maxy)
+```
+
+```{r}
+# Errori:
+err$XGBoost_RS = m.err(pred.xgboost.r)
+t(err)
+```
+
+```{r}
+# --- 5. Valutazione della Performance e Overfitting ---
+
+# Calcoli le previsioni sul set di validazione ('ver'), come nel tuo script
+cat("\n--- Valutazione della Performance ---\n")
+pred_train_xgb = pmin(pmax(predict(m.xgb.r, xmat.model.stima), miny), maxy)
+
+# Calcoliamo l'errore sia su training che su validation
+err_xgb <- list()
+err_xgb$XGB_train <- m.err(pred_train_xgb, stima$y)
+err_xgb$XGB_validation <- m.err(pred.xgboost.r, ver$y)
+
+cat("\nErrore sul Training Set vs Validation Set:\n")
+print(t(as.data.frame(err_xgb)))
+
+# Confronto:
+# - Se err$PPR_train è molto più basso di err$PPR_validation, il modello è in overfitting.
+#   Sta memorizzando il rumore dei dati di training.
+#   Soluzioni: ridurre 'nterms' (M), aumentare 'bass' per uno smoothing più forte,
+#   o usare più dati di training.
+# - Se entrambi gli errori sono alti, il modello è in underfitting (troppo semplice).
+#   Soluzioni: aumentare 'nterms' (M).
+```
+
+#### Analisi
+
+##### Imp. Variabili
+
+```{r}
+# --- 3. Importanza Globale delle Variabili (Invariato) ---
+# Questa funzione è già perfetta per l'alta dimensionalità,
+# perché si concentra sulle variabili più importanti.
+cat("\n--- Analisi dell'Importanza delle Variabili (Top 25) ---\n")
+importance_matrix <- xgb.importance(model = m.xgb.r)
+print(head(importance_matrix, 10))
+```
+
+```{r}
+xgb.plot.importance(importance_matrix, top_n = 10, 
+                    measure = "Gain", rel_to_first = TRUE, 
+                    xlab = "Relative Importance", 
+                    #main = "Importanza delle Variabili (Gain)",
+                    main = "")
+```
+
+```{r}
+# --- 5a. [SOLUZIONE ROBUSTA] Ricostruzione manuale del Grafico di Riepilogo SHAP ---
+
+# Carica i pacchetti necessari per la manipolazione dati e il plotting
+library(ggplot2)
+library(data.table)
+library(ggbeeswarm)
+library(SHAPforxgboost)
+
+cat("\n--- Preparazione manuale dei dati per il Riepilogo SHAP (Top 25) ---\n")
+
+# 1. Estrai i valori SHAP e i valori delle variabili
+shap_long <- shap.prep(m.xgb.r, X_train = xmat.model.ver, top_n = 10)
+
+# 2. Ordina i fattori per l'asse Y in base all'importanza media
+#    (in modo che la variabile più importante sia in alto)
+setorderv(shap_long, "variable", shap_long[, mean(abs(value))], order = -1)
+
+# 3. Crea il grafico con ggplot2
+cat("\n--- Creazione del grafico SHAP con ggplot2 ---\n")
+
+p_shap_summary <- ggplot(shap_long, aes(x = value, y = factor(variable, levels = unique(variable)))) +
+  # Aggiunge un "effetto jitter" per creare il "bee swarm plot"
+  ggbeeswarm::geom_quasirandom(
+    groupOnX = FALSE, 
+    varwidth = TRUE, 
+    size = 1.2, 
+    alpha = 0.7,
+    # Mappa il valore della variabile originale al colore
+    aes(color = stdfvalue) 
+  ) +
+  # Aggiunge una linea verticale a 0 (impatto nullo)
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  # Scala di colori da blu (basso) a rosso (alto)
+  scale_color_viridis_c(option = "magma", 
+                       name = "Valore della \nVariabile",
+                       guide = guide_colorbar(barwidth = 1, barheight = 12))+
+  # Etichette e titolo
+  labs(
+    y = "Variabile",
+    x = "Valore SHAP (impatto sulla previsione del modello)"
+    #title = "Riepilogo SHAP: Impatto delle Variabili sulle Previsioni"
+  ) +
+  # Tema pulito
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    legend.position = "right"
+  )
+# Stampa il grafico
+print(p_shap_summary)
+```
+
+##### Errori di previsione
+
+```{r}
+pred.xgboost.r <- pmin(pmax(predict(m.xgb.r, xmat.model.ver), miny), maxy)
+error_xgb.r <- ver$y - pred.xgboost.r
+```
+
+```{r}
+# 2. Crea un data frame unico per facilitare le analisi con ggplot2
+analisi_df <- data.frame(
+  reale = ver$y,
+  previsto = pred.xgboost.r,
+  errore = error_xgb.r,
+  reale_factor = as.factor(ver$y) # Utile per i raggruppamenti
+)
+
+cat("--- Analisi dei Errori per il Modello XGB ---\n")
+```
+
+```{r}
+# --- 4. Analisi dei Residui ---
+# Calcolo delle previsioni e degli errori
+
+# a) Grafico Residui vs Valori Previsti
+plot(pred.xgboost.r, ver$y,
+     #main = "Valori Osservati vs Valori Previsti (XGBoost, Insieme di Verifica)",
+     xlab = "Valori Previsti", ylab = "Valori Osservati",
+     pch = 20)
+```
+
+```{r}
+# b) Analisi specifica
+cat("\n--- Analisi degli errori ---\n")
+summary(error_xgb.r)
+hist(error_xgb.r, breaks = 20, 
+     #main = "Distribuzione degli Errori di previsione",
+     main= " ",
+     xlab = "Errore di Previsione (Osservato - Predetto)")
+abline(v = 0, col = "red", lty = 2)
+```
+
+```{r}
+# b) Analisi specifica per y > 12 (Invariato)
+cat("\n--- Analisi degli errori per valori estremi (y > 12) ---\n")
+extreme_idx <- which(ver$y > 12)
+summary(error_xgb.r[extreme_idx])
+hist(error_xgb.r[extreme_idx], breaks = 20, 
+     #main = "Distribuzione degli Errori per y > 12",
+     main = " ",
+     xlab = "Errore di Previsione (Osservato - Predetto)")
+abline(v = 0, col = "red", lty = 2)
+```
+
+```{r}
+plot_boxplot_per_classe <- ggplot(analisi_df, aes(x = reale_factor, y = errore, fill = reale_factor)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+  scale_fill_viridis_d(guide = "none") + # Usa la stessa palette, nasconde la legenda
+  labs(
+    #title = "Distribuzione dei errori di previsione per Classe Reale",
+    #subtitle = "Analisi del bias e dell'incertezza per categoria",
+    x = "Classe Reale",
+    y = "Errore di Previsione"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(plot_boxplot_per_classe)
+```
+
+### LightGBM Random Search
+
+```{r}
+# Funzione per calcolare i pesi inversi della frequenza per un vettore di target
+calcola_pesi <- function(target) {
+  freq_table <- as.data.frame(table(target))
+  names(freq_table) <- c("y_value", "count")
+  freq_table$y_value <- as.numeric(as.character(freq_table$y_value))
+  total_samples <- length(target)
+  freq_table$weight <- total_samples / freq_table$count
+  pesi <- freq_table$weight[match(target, freq_table$y_value)]
+  return(pesi)
+}
+```
+
+
+```{r}
+# Caricamento dei pacchetti necessari
+library(lightgbm)
+library(dplyr) # Utile per la gestione dei risultati
+
+set.seed(40)
+# Esempio di suddivisione dati (adattare ai propri indici)
+train_x <- xmat.model.stima[cb1, ]
+train_y <- y[cb1]
+valid_x <- xmat.model.stima[cb2, ]
+valid_y <- y[cb2]
+s_x <- xmat.model.stima
+s_y <- y
+
+# Calcolo dei pesi
+weights_train <- calcola_pesi(train_y)
+weights_valid <- calcola_pesi(valid_y) # solo se vuoi validare pesato (di solito NO)
+weights_stima <- calcola_pesi(s_y)
+
+# Creazione dei dataset specifici per LightGBM
+lgb_train <- lgb.Dataset(data = train_x, label = train_y, weight = weights_train)
+lgb_valid <- lgb.Dataset(data = valid_x, label = valid_y)  # NO pesi per validazione
+lgb_stima <- lgb.Dataset(data = s_x, label = s_y, weight = weights_stima)
+
+# --- 2. Random Search per Ottimizzazione Iperparametri (obiettivo: RMSE) ---
+
+# Definiamo lo spazio di ricerca per gli iperparametri
+param_grid <- list(
+  learning_rate = 0.01,
+  num_leaves = as.integer(runif(10, min = 20, max = 150)),
+  max_depth = c(3, 5, 8, 10, 12, 15),
+  subsample = c(0.5, 0.6, 0.7, 0.8, 0.9),
+  colsample_bytree = c(0.5, 0.6, 0.7, 0.8, 0.9),
+  lambda_l1 = c(0, 0.1, 0.5, 1),
+  lambda_l2 = c(0, 0.1, 0.5, 1)
+)
+
+# Numero di combinazioni da testare
+num_searches <- 100
+
+# Data frame per salvare i risultati della ricerca
+search_results <- data.frame(
+  iteration = 1:num_searches,
+  learning_rate = numeric(num_searches),
+  num_leaves = integer(num_searches),
+  max_depth = integer(num_searches),
+  subsample = numeric(num_searches),
+  colsample_bytree = numeric(num_searches),
+  lambda_l1 = numeric(num_searches),
+  lambda_l2 = numeric(num_searches),
+  best_rmse = numeric(num_searches),
+  best_iteration = integer(num_searches)
+)
+```
+
+```{r}
+cat("Avvio della Random Search per", num_searches, "combinazioni (obiettivo: minimizzare RMSE)...\n")
+
+# Creazione della "watchlist" per il training durante la ricerca
+valids_search <- list(valid = lgb_valid)
+
+for (i in 1:num_searches) {
+  
+  # Campionamento casuale dei parametri
+  params <- list(
+    learning_rate = sample(param_grid$learning_rate, 1),
+    num_leaves = sample(param_grid$num_leaves, 1),
+    max_depth = sample(param_grid$max_depth, 1),
+    subsample = sample(param_grid$subsample, 1),
+    colsample_bytree = sample(param_grid$colsample_bytree, 1),
+    lambda_l1 = sample(param_grid$lambda_l1, 1),
+    lambda_l2 = sample(param_grid$lambda_l2, 1)
+  )
+  
+  # Parametri del modello per regressione RMSE
+  lgb_params <- list(
+    objective = "regression",
+    metric = "rmse",
+    learning_rate = params$learning_rate,
+    num_leaves = params$num_leaves,
+    max_depth = params$max_depth,
+    subsample = params$subsample,
+    colsample_bytree = params$colsample_bytree,
+    lambda_l1 = params$lambda_l1,
+    lambda_l2 = params$lambda_l2,
+    nthread = 4,
+    verbose = -1,
+    
+    seed = 42, # Seed generico per l'algoritmo
+    bagging_seed = 42, # Seed specifico per il campionamento delle righe (subsample)
+    feature_fraction_seed = 42 # Seed per il campionamento delle colonne
+  )
+  
+  # Addestramento con i parametri correnti
+  m_lgb_search <- lgb.train(
+    params = lgb_params,
+    data = lgb_train,
+    nrounds = 3000,
+    valids = valids_search,
+    early_stopping_rounds = 20,
+    verbose = -1
+  )
+  
+  # Salvataggio dei risultati
+  search_results$learning_rate[i] = params$learning_rate
+  search_results$num_leaves[i] = params$num_leaves
+  search_results$max_depth[i] = params$max_depth
+  search_results$subsample[i] = params$subsample
+  search_results$colsample_bytree[i] = params$colsample_bytree
+  search_results$lambda_l1[i] = params$lambda_l1
+  search_results$lambda_l2[i] = params$lambda_l2
+  search_results$best_rmse[i] <- m_lgb_search$best_score
+  search_results$best_iteration[i] <- m_lgb_search$best_iter
+  
+  # >>> INIZIO MODIFICA: GESTIONE DELLA MEMORIA <<<
+  # Rimuoviamo l'oggetto del modello appena creato per liberare RAM
+  rm(m_lgb_search)
+  # Forziamo il garbage collector a pulire la memoria
+  gc()
+  # >>> FINE MODIFICA <<<
+  
+  # Stampa un aggiornamento sullo stato di avanzamento ogni 10 iterazioni o all'ultima
+  if (i %% 10 == 0 || i == num_searches) {
+    current_best_rmse <- min(search_results$best_rmse[1:i])
+    cat("Completate ", i, "/", num_searches, 
+        " combinazioni. Miglior RMSE finora: ", round(current_best_rmse, 5), "\n")
+  }
+}
+```
+
+```{r}
+# --- 3. Identificazione Parametri Migliori e Addestramento Finale ---
+
+# Trova la riga con il miglior punteggio (l'RMSE più basso)
+best_params_row <- search_results %>%
+  arrange(best_rmse) %>%
+  slice(1)
+
+print("Migliori parametri trovati per RMSE:")
+print(best_params_row)
+
+# Costruisci la lista dei parametri finali
+best_lgb_params <- list(
+  objective = "regression",
+  metric = "rmse",
+  learning_rate = best_params_row$learning_rate,
+  num_leaves = best_params_row$num_leaves,
+  max_depth = best_params_row$max_depth,
+  subsample = best_params_row$subsample,
+  colsample_bytree = best_params_row$colsample_bytree,
+  lambda_l1 = best_params_row$lambda_l1,
+  lambda_l2 = best_params_row$lambda_l2,
+  nthread = 4,
+  verbose = -1,
+  
+  seed = 42,
+  bagging_seed = 42,
+  feature_fraction_seed = 42
+)
+```
+
+```{r}
+# Addestramento del modello finale con i parametri migliori
+cat("\nAddestramento del modello finale con i parametri migliori...\n")
+
+m.lgb_rmse_optimized <- lgb.train(
+  params = best_lgb_params,
+  data = lgb_stima,
+  nrounds = best_params_row$best_iteration,
+  verbose = 1
+)
+
+cat("Modello finale addestrato.\n")
+```
+
+
+```{r}
+# Previsione sull'insieme di verifica
+pred.lgb.r <- pmin(pmax(predict(m.lgb_rmse_optimized, xmat.model.ver), miny), maxy)
+
+err$LightGBM_R <- m.err(pred.lgb.r) 
+t((err))
+```
+
+### CatBoost Random Search
+
+```{r}
+# Caricamento dei pacchetti necessari
+library(catboost)
+library(dplyr)
+
+# --- Impostazione Seed per la Riproducibilità ---
+set.seed(123) # Seed globale per le operazioni R (sample, runif, etc.)
+
+# --- 1. Preparazione Dati (invariato) ---
+# Assumiamo che questi oggetti siano già nel tuo ambiente:
+# train_x, train_y, valid_x, valid_y, s_x, s_y, xmat.model.ver, miny, maxy, etc.
+
+# Creazione dei "pool", il formato dati di CatBoost
+train_pool <- catboost.load_pool(data = train_x, label = train_y, weight = weights_train)
+valid_pool <- catboost.load_pool(data = valid_x, label = valid_y)
+stima_pool <- catboost.load_pool(data = s_x, label = s_y, weight = weights_stima)
+ver_pool <- catboost.load_pool(data = xmat.model.ver)
+
+
+# --- 2. Random Search per Ottimizzazione Iperparametri (obiettivo: RMSE) ---
+
+# Definiamo lo spazio di ricerca per gli iperparametri di CatBoost
+param_grid_cb <- list(
+  learning_rate = 0.01,
+  depth = c(6, 8, 10, 12),
+  subsample = c(0.6, 0.7, 0.8, 0.9),
+  colsample_bylevel = c(0.6, 0.7, 0.8, 0.9),
+  l2_leaf_reg = c(1, 3, 5, 7, 10) # Regolarizzazione L2
+)
+
+# Numero di combinazioni da testare
+num_searches <- 100
+
+# Data frame per salvare i risultati
+search_results_cb <- data.frame(
+  iteration = 1:num_searches,
+  learning_rate = numeric(num_searches),
+  depth = integer(num_searches),
+  subsample = numeric(num_searches),
+  colsample_bylevel = numeric(num_searches),
+  l2_leaf_reg = numeric(num_searches),
+  best_rmse = numeric(num_searches),
+  best_iteration = integer(num_searches)
+)
+```
+
+```{r}
+cat("Avvio della Random Search per CatBoost (", num_searches, " combinazioni)...\n")
+
+for (i in 1:num_searches) {
+  
+  # Campionamento casuale dei parametri
+  params <- list(
+    learning_rate = sample(param_grid_cb$learning_rate, 1),
+    depth = sample(param_grid_cb$depth, 1),
+    subsample = sample(param_grid_cb$subsample, 1),
+    colsample_bylevel = sample(param_grid_cb$colsample_bylevel, 1),
+    l2_leaf_reg = sample(param_grid_cb$l2_leaf_reg, 1)
+  )
+  
+  # Parametri del modello per regressione RMSE
+  catboost_params <- list(
+    loss_function = 'RMSE',
+    eval_metric = 'RMSE',
+    
+    learning_rate = params$learning_rate,
+    depth = params$depth,
+    subsample = params$subsample,
+    colsample_bylevel = params$colsample_bylevel,
+    l2_leaf_reg = params$l2_leaf_reg,
+    
+    iterations = 1000,
+    early_stopping_rounds = 20,
+    
+    thread_count = 4,
+    verbose = 0, 
+    random_seed = 42,
+    use_best_model=TRUE
+  )
+  
+  # Addestramento con i parametri correnti
+  m_cb_search <- catboost.train(
+    learn_pool = train_pool,
+    test_pool = valid_pool,
+    params = catboost_params
+  )
+  
+  # Salvataggio dei risultati
+  search_results_cb$learning_rate[i] <- params$learning_rate
+  search_results_cb$depth[i] <- params$depth
+  search_results_cb$subsample[i] <- params$subsample
+  search_results_cb$colsample_bylevel[i] <- params$colsample_bylevel
+  search_results_cb$l2_leaf_reg[i] <- params$l2_leaf_reg
+  
+  # 1) Migliore iterazione (0-based) come numero di alberi - 1
+  tree_count <- m_cb_search$tree_count
+  best_iteration <- tree_count - 1
+  
+  # 2) Miglior RMSE sul validation (modello già troncato alla best iteration)
+  pred_valid <- catboost.predict(m_cb_search, valid_pool)
+  best_rmse <- sqrt(mean((pred_valid - valid_y)^2))
+  
+  search_results_cb$best_iteration[i] <- best_iteration
+  search_results_cb$best_rmse[i] <- best_rmse
+  # Pulizia (opzionale)
+  rm(m_cb_search)
+  gc()
+  
+  # Stampa un aggiornamento sullo stato di avanzamento
+  if (i %% 5 == 0 || i == num_searches) {
+    current_best_rmse <- min(search_results_cb$best_rmse[1:i])
+    cat("Completate ", i, "/", num_searches, 
+        " combinazioni. Miglior RMSE finora: ", round(current_best_rmse, 5), "\n")
+  }
+}
+
+cat("Ricerca per CatBoost completata.\n\n")
+```
+
+```{r}
+# --- 3. Identificazione Parametri Migliori e Addestramento Finale ---
+
+# Trova la riga con il miglior punteggio (l'RMSE più basso)
+best_params_row_cb <- search_results_cb %>%
+  arrange(best_rmse) %>%
+  slice(1)
+
+print("Migliori parametri trovati per CatBoost (RMSE):")
+print(best_params_row_cb)
+
+# Costruisci la lista dei parametri finali, includendo il seed
+best_catboost_params <- list(
+  loss_function = 'RMSE',
+  eval_metric = 'RMSE',
+  
+  learning_rate = best_params_row_cb$learning_rate,
+  depth = best_params_row_cb$depth,
+  subsample = best_params_row_cb$subsample,
+  colsample_bylevel = best_params_row_cb$colsample_bylevel,
+  l2_leaf_reg = best_params_row_cb$l2_leaf_reg,
+  
+  # Usiamo il numero di iterazioni ottimale
+  iterations = best_params_row_cb$best_iteration,
+  
+  thread_count = 4,
+  verbose = 100,
+  random_seed = 42 # Fondamentale per la riproducibilità del modello finale
+)
+```
+
+```{r}
+# Addestramento del modello finale con i parametri migliori e i seed
+cat("\nAddestramento del modello finale CatBoost...\n")
+
+m.catboost.r <- catboost.train(
+  learn_pool = stima_pool, # Addestramento sul dataset completo
+  params = best_catboost_params
+)
+
+cat("Modello finale CatBoost addestrato.\n")
+```
+
+```{r}
+# Previsione sull'insieme di verifica
+pred.catboost.r <- pmin(pmax(catboost.predict(m.catboost.r, ver_pool), miny), maxy)
+
+# Calcolo e confronto degli errori
+err$CatBoost.R <- m.err(pred.catboost.r) 
+t(err)
+```
+
+# Risultati - log y
+
+```{r, fig.height=15}
+library(kableExtra)
+library(dplyr)
+
+print_table <- function(data, order_by = c("mse", "qwk", "macro_f1", "acc")) {
+  order_by <- match.arg(order_by)
+  df <- as.data.frame(t(data))
+  
+  # Ordinamento e impostazioni grafiche
+  if(order_by == "mse") {
+    df <- arrange(df, mse)
+    caption <- "Modelli ordinati per MSE crescente"
+    color <- "#D7261E"
+  } else if(order_by == "qwk") {
+    df <- arrange(df, desc(qwk))
+    caption <- "Modelli ordinati per QWK decrescente"
+    color <- "#1E90FF"
+  } else if(order_by == "macro_f1") {
+    df <- arrange(df, desc(macro_f1))
+    caption <- "Modelli ordinati per F1 macro decrescente"
+    color <- "#28A745"
+  } else if(order_by == "acc") {
+    df <- arrange(df, desc(acc))
+    caption <- "Modelli ordinati per Accuracy decrescente"
+    color <- "#F7B731"
+  }
+  
+  df %>%
+    kbl(digits = 8, caption = caption) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                  full_width = TRUE,
+                  position = "center",
+                  font_size = 15) %>%
+    row_spec(1, bold = TRUE, color = "white", background = color)
+}
+
+# Uso:
+print_table(err, "mse")
+print_table(err, "qwk")
+print_table(err, "macro_f1")
+print_table(err, "acc")
+```
+
+# Risultati "classificazione":
+
+```{r}
+# Lista dei vettori di predizione da convertire
+# pred.list <- list(
+#   lin_saturo = p.lm,
+#   ridge = pred.ridge,
+#   lasso = pred.lasso,
+#   lasso_ada = pred.lasso_ada,
+#   addittivo = p.gam,
+#   addittivo_lasso = p.gam2,
+#   ppr = p.ppr,
+#   ppr2 = p.ppr2,
+#   mars = p.mars,
+#   nn = p.net,
+#   random_forest = p.ranfo,
+#   mcp = p.mcp,
+#   scad = pred.scad,
+#   elastic_net = pred.elastic_net,
+#   gglasso = pred.gglasso,
+#   gglasso_3 = pred.gglasso3,
+#   group_mcp = p.mcp_g,
+#   group_scad = p.scad_g,
+#   #group_en = pred.group.elastic_net,
+#   fuse = pred_fuse,
+#   xgboost = pred.xgboost,
+#   xgboost2 = pred.xgboost.r,
+#   lightgbm = pred.lgb,
+#   lightgbm2 = pred.lgb.r,
+#   catboost = pred.catboost,
+#   catboost2 = pred.catboost.r
+# )
+```
+
+```{r}
+# Lista dei vettori di predizione da convertire
+pred.list <- list(
+  lin_saturo = p.lm,
+  ridge = pred.ridge,
+  lasso = pred.lasso,
+  elastic_net = pred.elastic_net,
+  addittivo_lasso = p.gam2,
+  ppr = p.ppr,
+  ppr2 = p.ppr2,
+  nn = p.net,
+  xgboost2 = pred.xgboost.r,
+  lightgbm2 = pred.lgb.r,
+  catboost2 = pred.catboost.r
+)
+```
+
+
+
+```{r}
+set.seed(42)
+# DEFINIZIONE SCALA ORDINATA
+scale_vals  <- c(4.61, 5.77, 6.92, 8.08, 
+                 9.23, 10.38, 11.54, 12.69, 
+                 13.84, 15.00, 16.15)
+#scale_vals  <- c(4.61, 5.77, 6.92, 8.08, 9.23, 10.38, 11.54, 12.69)
+scale_codes <- c("V4", "V5", "V6", "V7",
+                 "V8", "V9","V10", "V11", 
+                 "V12", "V13", "V14")
+
+stopifnot(length(scale_vals) == length(scale_codes))
+
+K <- length(scale_vals)
+
+# Per sicurezza ordino (se già ordinati non cambia niente)
+o <- order(scale_vals)
+scale_vals  <- scale_vals[o]
+scale_codes <- scale_codes[o]
+
+# Calcolo midpoint per classificazione (bucketization)
+midpoints <- (head(scale_vals, -1) + tail(scale_vals, -1)) / 2
+breaks <- c(-Inf, midpoints, Inf)
+
+# Funzione: assegna un vettore numerico all'indice (1..K) del valore scala più vicino
+assign_index <- function(x) {
+  # findInterval restituisce l'indice del bucket (1..K)
+  findInterval(x, breaks, rightmost.closed = TRUE)
+}
+
+# Funzione di utilità: da indice a codice / valore
+index_to_code <- function(idx) {
+  # idx deve essere tra 1 e K (NA rimane NA)
+  out <- rep(NA_character_, length(idx))
+  ok <- !is.na(idx) & idx >= 1 & idx <= K
+  out[ok] <- scale_codes[idx[ok]]
+  out
+}
+index_to_value <- function(idx) {
+  out <- rep(NA_real_, length(idx))
+  ok <- !is.na(idx) & idx >= 1 & idx <= K
+  out[ok] <- scale_vals[idx[ok]]
+  out
+}
+
+# Preparazione delle label 'true'
+if (is.null(ver$y)) stop("ver$y mancante!")
+
+# Convertiamo ver$y in numerico “continuo” y_num (se già label codici li rimappiamo)
+if (is.factor(ver$y) || is.character(ver$y)) {
+  y_char <- as.character(ver$y)
+  # Se già coincidono con scale_codes:
+  if (all(y_char %in% scale_codes)) {
+    # Convertiamo ai corrispondenti valori numerici
+    y_num <- scale_vals[match(y_char, scale_codes)]
+  } else {
+    # Provo numerico
+    suppressWarnings(y_num_try <- as.numeric(y_char))
+    if (all(!is.na(y_num_try))) {
+      y_num <- y_num_try
+    } else {
+      stop("Le etichette di ver$y non corrispondono a scale_codes e non sono numeriche convertibili.")
+    }
+  }
+} else if (is.numeric(ver$y)) {
+  y_num <- ver$y
+} else {
+  stop("Tipo di ver$y non supportato.")
+}
+
+# Assegniamo indice della scala
+true_idx <- assign_index(y_num)
+
+# Fattore finale per la verità, con etichette desiderate
+true_codes <- index_to_code(true_idx)
+true.factor <- factor(true_codes, levels = scale_codes)  # Ordine garantito
+
+# --- Analisi modelli ---
+if (!is.list(pred.list) || length(pred.list) == 0) stop("pred.list deve essere una lista non vuota!")
+
+risultati <- list()
+
+for (name in names(pred.list)) {
+  pred_raw <- pred.list[[name]]
+
+  if (!is.numeric(pred_raw)) {
+    suppressWarnings(pred_num <- as.numeric(pred_raw))
+    if (any(is.na(pred_num))) {
+      warning(sprintf("Predizioni '%s' non numeriche o conversione fallita", name))
+      next
+    }
+  } else {
+    pred_num <- pred_raw
+  }
+
+  pred_idx <- assign_index(pred_num)
+  pred_codes <- index_to_code(pred_idx)
+  pred.factor <- factor(pred_codes, levels = scale_codes)
+
+  # Dati validi (escludi NA)
+  valid_idx <- !is.na(true.factor) & !is.na(pred.factor)
+  if (!any(valid_idx)) {
+    warning(sprintf("Nessun dato valido per '%s'", name))
+    next
+  }
+
+  # Accuracy
+  acc <- mean(pred.factor[valid_idx] == true.factor[valid_idx])
+
+  # QWK: usiamo gli indici ordinali (1..K)
+  true_idx_valid <- as.integer(true.factor[valid_idx])  # fattore -> 1..K
+  pred_idx_valid <- as.integer(pred.factor[valid_idx])
+
+  if (requireNamespace("irr", quietly = TRUE)) {
+    # Costruisco matrice di "etichette" come caratteri dei codici (può andare)
+    # ma per sicurezza convertiamo a fattori coerenti
+    # tmp_true <- factor(scale_codes[true_idx_valid], levels = scale_codes)
+    # tmp_pred <- factor(scale_codes[pred_idx_valid], levels = scale_codes)
+    # qwk <- irr::kappa2(cbind(as.character(tmp_true), as.character(tmp_pred)),
+    #                    weight = "squared")$value
+    qwk <- irr::kappa2(cbind(true_idx_valid, pred_idx_valid), 
+                   weight = "squared")$value
+  } else if (requireNamespace("DescTools", quietly = TRUE)) {
+    # DescTools::CohenKappa richiede fattori/character; pesi quadratic
+    tmp_true <- factor(scale_codes[true_idx_valid], levels = scale_codes)
+    tmp_pred <- factor(scale_codes[pred_idx_valid], levels = scale_codes)
+    qwk <- DescTools::CohenKappa(cbind(tmp_true, tmp_pred),
+                                 weights = "quadratic")$kappa
+  } else {
+    qwk <- NA_real_
+    warning("Pacchetto 'irr' o 'DescTools' non disponibile: QWK non calcolato.")
+  }
+
+  # Confusion matrix + F1 macro
+  if (requireNamespace("caret", quietly = TRUE)) {
+    cm <- caret::confusionMatrix(pred.factor[valid_idx], true.factor[valid_idx])
+    # cm$byClass è una matrice (classe x metriche) in multi-class
+    sens <- cm$byClass[, "Sensitivity"]
+    prec <- cm$byClass[, "Pos Pred Value"]
+    F1_per_class <- 2 * sens * prec / (sens + prec)
+    F1_per_class[is.na(F1_per_class)] <- 0 # Penalizza le classi ignorate
+    f1_macro <- mean(F1_per_class)
+    cm_table <- addmargins(cm$table)
+  } else {
+    f1_macro <- NA_real_
+    cm_table <- NA
+  }
+
+  cat("\nModello:", name, "\n")
+  cat("Accuracy:", round(acc, 3), "\n")
+  cat("F1 macro:", round(f1_macro, 3), "\n")
+  cat("QWK:", ifelse(is.na(qwk), "NA", round(qwk, 3)), "\n\n")
+
+  cat("Distribuzione label predette (ordine fisso V4..V14):\n")
+  print(table(pred.factor))  # segue levels = scale_codes
+
+  cat("\nDistribuzione label vere (ordine fisso V4..V14):\n")
+  print(table(true.factor))
+
+  cat("\nConfusion Matrix:\n")
+  print(cm_table)
+  cat("--------------------------------------------------------------------------------\n")
+
+  risultati[[name]] <- list(
+    acc = acc,
+    f1_macro = f1_macro,
+    qwk = qwk,
+    counts_pred = table(pred.factor),
+    counts_true = table(true.factor),
+    cm = cm_table
+  )
+}
+
+# risultati ora ha le metriche per ciascun modello, con etichette V4..V14
+```
+

@@ -1,0 +1,8 @@
+# R / RStudio local artifacts
+.Rhistory
+.RData
+.Rproj.user/
+
+# Python cache
+__pycache__/
+*.pyc
