@@ -1,0 +1,12 @@
+name: moonboard_app
+title: moonboard_app
+username: ivlq4s-francesco0pietro-pagano
+account: ivlq4s-francesco0pietro-pagano
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 15522809
+bundleId: 10936922
+url: https://ivlq4s-francesco0pietro-pagano.shinyapps.io/moonboard_app/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
